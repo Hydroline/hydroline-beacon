@@ -19,7 +19,7 @@ async function main() {
   const key = requireEnv("BEACON_KEY");
   const playerUuid = process.env.BEACON_PLAYER_UUID;
   const outDir = process.env.OUTPUT_DIR || path.resolve(process.cwd(), "output");
-  ensureDir(outDir);
+  await prepareOutputDir(outDir);
 
   const url = `http://${host}:${port}`;
   console.log(`Connecting to ${url} ...`);
@@ -62,6 +62,83 @@ async function main() {
 
       const force = await emitWithAck(socket, "force_update", { key }, "force_update");
       await writeJson(outDir, `force_update.json`, force);
+
+      // MTR logs listing (first page)
+      const mtrList = await emitWithAck(socket, "get_player_mtr_logs", {
+        key,
+        playerUuid,
+        page: 1,
+        pageSize: 20
+      }, "get_player_mtr_logs");
+      await writeJson(outDir, `mtr_logs_page1.json`, mtrList);
+
+      if (mtrList && mtrList.records && mtrList.records.length > 0) {
+        const firstId = mtrList.records[0].id;
+        const mtrDetail = await emitWithAck(socket, "get_mtr_log_detail", { key, id: firstId }, "get_mtr_log_detail");
+        await writeJson(outDir, `mtr_log_${firstId}.json`, mtrDetail);
+      }
+
+      // MTR logs with singleDate = today
+      const today = formatDate(new Date());
+      const mtrToday = await emitWithAck(socket, "get_player_mtr_logs", {
+        key,
+        playerUuid,
+        singleDate: today,
+        page: 1,
+        pageSize: 50
+      }, "get_player_mtr_logs(singleDate)");
+      await writeJson(outDir, `mtr_logs_${today}.json`, mtrToday);
+
+      // MTR logs with date range (last 7 days)
+      const endDate = today;
+      const startDate = formatDate(addDays(new Date(), -6));
+      const mtrLast7 = await emitWithAck(socket, "get_player_mtr_logs", {
+        key,
+        playerUuid,
+        startDate,
+        endDate,
+        page: 1,
+        pageSize: 50
+      }, "get_player_mtr_logs(range7d)");
+      await writeJson(outDir, `mtr_logs_${startDate}_to_${endDate}.json`, mtrLast7);
+
+      // Player sessions: page 1
+      const sessionsPage1 = await emitWithAck(socket, "get_player_sessions", {
+        key,
+        page: 1,
+        pageSize: 50
+      }, "get_player_sessions(page1)");
+      await writeJson(outDir, `player_sessions_page1.json`, sessionsPage1);
+
+      // Player sessions: today only
+      const sessionsToday = await emitWithAck(socket, "get_player_sessions", {
+        key,
+        singleDate: today,
+        page: 1,
+        pageSize: 100
+      }, "get_player_sessions(today)");
+      await writeJson(outDir, `player_sessions_${today}.json`, sessionsToday);
+
+      // Player sessions: JOIN only today
+      const sessionsJoinToday = await emitWithAck(socket, "get_player_sessions", {
+        key,
+        eventType: "JOIN",
+        singleDate: today,
+        page: 1,
+        pageSize: 100
+      }, "get_player_sessions(join_today)");
+      await writeJson(outDir, `player_sessions_JOIN_${today}.json`, sessionsJoinToday);
+
+      // Player sessions: by player if provided
+      if (playerUuid) {
+        const sessionsByPlayer = await emitWithAck(socket, "get_player_sessions", {
+          key,
+          playerUuid,
+          page: 1,
+          pageSize: 100
+        }, "get_player_sessions(by_player)");
+        await writeJson(outDir, `player_sessions_${sanitize(playerUuid)}.json`, sessionsByPlayer);
+      }
     } catch (err) {
       console.error("Test error:", err.message);
     } finally {
@@ -78,11 +155,12 @@ async function main() {
   });
 }
 
-function ensureDir(dir) {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (e) {
-    // ignore
+async function prepareOutputDir(dir) {
+  if (fs.existsSync(dir)) {
+    const entries = await fs.promises.readdir(dir);
+    await Promise.all(entries.map((name) => fs.promises.rm(path.join(dir, name), { recursive: true, force: true })));
+  } else {
+    await fs.promises.mkdir(dir, { recursive: true });
   }
 }
 
@@ -119,6 +197,19 @@ function emitWithAck(socket, event, payload, label) {
       resolve(args[0]);
     });
   });
+}
+
+function formatDate(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function addDays(d, n) {
+  const copy = new Date(d.getTime());
+  copy.setDate(copy.getDate() + n);
+  return copy;
 }
 
 main().catch((err) => {
