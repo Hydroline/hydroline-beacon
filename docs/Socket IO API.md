@@ -50,7 +50,12 @@
 - 请求：
 
 ```json
-{ "key": "<key>", "playerUuid": "<uuid>", "playerName": "<name>" }
+{
+  "key": "<key>",
+  "playerUuid": "<uuid>",
+  "playerName": "<name>",
+  "keys": ["minecraft:story/root", "mod:x_custom_adv"]
+}
 ```
 
 - ACK 成功示例：
@@ -69,6 +74,7 @@
 - 关键说明：
   - `advancements` 的每个 value 是一个 **JSON 字符串**（UTF-8 bytes 存储）。客户端需 `JSON.parse()` 或等效解析。不要假设它已是对象。
   - 键为 Advancement ID，例如 `minecraft:story/root` 或 mod 提供的 ID。
+  - 可选 `keys` 数组用于只取关心的条目，若缺失对应键则返回结果中不包含该键。
 
 3. get_player_stats
 
@@ -76,7 +82,12 @@
 - 请求：
 
 ```json
-{ "key": "<key>", "playerUuid": "<uuid>", "playerName": "<name>" }
+{
+  "key": "<key>",
+  "playerUuid": "<uuid>",
+  "playerName": "<name>",
+  "keys": ["minecraft:custom:minecraft:jump"]
+}
 ```
 
 - ACK 成功示例：
@@ -95,6 +106,7 @@
 - 关键说明：
   - 存储格式为：`category + ":" + statName`，但实际 category 字段可能本身包含 `:`，因此客户端请按最后一个冒号或按约定拆分（具体拆法由接入方需求决定）。不要对 `stats` key 做过于严格的硬编码解析。
   - value 为整型（long）。
+  - 可选 `keys` 数组用于只取关心的条目，缺失的键不会出现在响应里。
 
 4. list_online_players
 
@@ -155,6 +167,7 @@
   "dimensionContext": "overworld|the_nether|the_end|...",
   "entryId": "<entry id>",
   "changeType": "ADD|REMOVE|UPDATE",
+  "order": "asc|desc",
   "page": 1,
   "pageSize": 50
 }
@@ -163,6 +176,7 @@
 - 约束与说明：
   - `singleDate` 与 `startDate/endDate` 互斥；日期格式为 `YYYY-MM-DD`，服务器按本地时区做整日范围。
   - 若请求页超出范围，会自动重置到第 1 页并返回有效数据。
+  - `order` 默认为 `desc`（按 `id` 倒序），填入 `asc` 可改为正序。
 - ACK 成功示例：
 
 ```json

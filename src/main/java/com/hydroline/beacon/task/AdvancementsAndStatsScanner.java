@@ -22,7 +22,8 @@ import java.util.Map;
 public class AdvancementsAndStatsScanner {
 
     private static final String FILE_TYPE_ADVANCEMENTS = "advancements";
-    private static final String FILE_TYPE_STATS = "stats";
+    // Bump the stats file type key to force a rescan after fixing nested parsing.
+    private static final String FILE_TYPE_STATS = "stats_v2";
 
     private final BeaconPlugin plugin;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -128,19 +129,11 @@ public class AdvancementsAndStatsScanner {
                     upserted++;
                 }
             } else if (FILE_TYPE_STATS.equals(fileType)) {
-                Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
-                while (fields.hasNext()) {
-                    Map.Entry<String, JsonNode> categoryEntry = fields.next();
-                    String category = categoryEntry.getKey();
-                    JsonNode categoryNode = categoryEntry.getValue();
-                    Iterator<Map.Entry<String, JsonNode>> statFields = categoryNode.fields();
-                    while (statFields.hasNext()) {
-                        Map.Entry<String, JsonNode> statEntry = statFields.next();
-                        String statKey = category + ":" + statEntry.getKey();
-                        long value = statEntry.getValue().asLong(0L);
-                        upsertStat(connection, playerUuid, statKey, value, now);
-                        upserted++;
-                    }
+                JsonNode statsNode = root.get("stats");
+                if (statsNode != null && statsNode.isObject()) {
+                    upserted += upsertStatsRecursive(connection, playerUuid, statsNode, "", now);
+                } else {
+                    upserted += upsertStatsRecursive(connection, playerUuid, root, "", now);
                 }
             }
 
@@ -148,6 +141,39 @@ public class AdvancementsAndStatsScanner {
         } catch (SQLException e) {
             plugin.getLogger().severe("Failed to upsert data for file " + absolutePath + ": " + e.getMessage());
             return -1;
+        }
+
+        return upserted;
+    }
+
+    private int upsertStatsRecursive(Connection connection,
+                                     String playerUuid,
+                                     JsonNode node,
+                                     String prefix,
+                                     long lastUpdated) throws SQLException {
+        if (node == null || !node.isObject()) {
+            return 0;
+        }
+
+        int upserted = 0;
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String fieldKey = entry.getKey();
+            if (prefix.isEmpty() && "DataVersion".equals(fieldKey)) {
+                continue;
+            }
+
+            String statKey = prefix.isEmpty() ? fieldKey : prefix + ":" + fieldKey;
+            JsonNode valueNode = entry.getValue();
+
+            if (valueNode.isObject()) {
+                upserted += upsertStatsRecursive(connection, playerUuid, valueNode, statKey, lastUpdated);
+            } else if (valueNode.isNumber()) {
+                long value = valueNode.asLong(0L);
+                upsertStat(connection, playerUuid, statKey, value, lastUpdated);
+                upserted++;
+            }
         }
 
         return upserted;

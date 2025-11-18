@@ -18,8 +18,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
@@ -85,7 +87,8 @@ public class SocketServerManager {
                     try {
                         String uuid = ensurePlayerUuid(data.getPlayerUuid(), data.getPlayerName());
                         if (uuid == null) { sendError(ackSender, "NOT_FOUND"); return; }
-                        Map<String, String> advancements = loadAdvancementsForPlayer(uuid);
+                        Set<String> filters = normalizeFilterKeys(data.getKeys());
+                        Map<String, String> advancements = loadAdvancementsForPlayer(uuid, filters);
                         resp.put("success", true);
                         resp.put("player_uuid", uuid);
                         resp.put("advancements", advancements);
@@ -105,7 +108,8 @@ public class SocketServerManager {
                     try {
                         String uuid = ensurePlayerUuid(data.getPlayerUuid(), data.getPlayerName());
                         if (uuid == null) { sendError(ackSender, "NOT_FOUND"); return; }
-                        Map<String, Long> stats = loadStatsForPlayer(uuid);
+                        Set<String> filters = normalizeFilterKeys(data.getKeys());
+                        Map<String, Long> stats = loadStatsForPlayer(uuid, filters);
                         resp.put("success", true);
                         resp.put("player_uuid", uuid);
                         resp.put("stats", stats);
@@ -175,7 +179,8 @@ public class SocketServerManager {
                                 data.getEntryId(),
                                 data.getChangeType(),
                                 data.getPage(),
-                                data.getPageSize()
+                                data.getPageSize(),
+                                data.getOrder()
                         );
                         result.put("success", true);
                         ackSender.sendAckData(result);
@@ -353,41 +358,115 @@ public class SocketServerManager {
         ackSender.sendAckData(resp);
     }
 
-    private Map<String, String> loadAdvancementsForPlayer(String playerUuid) throws SQLException {
+    private Set<String> normalizeFilterKeys(List<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return null;
+        }
+        Set<String> normalized = new HashSet<>();
+        for (String key : keys) {
+            if (key == null) {
+                continue;
+            }
+            String trimmed = key.trim();
+            if (!trimmed.isEmpty()) {
+                normalized.add(trimmed);
+            }
+        }
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    private String normalizeOrder(String order) {
+        if (order == null || order.isEmpty()) {
+            return "DESC";
+        }
+        if ("asc".equalsIgnoreCase(order)) {
+            return "ASC";
+        }
+        if ("desc".equalsIgnoreCase(order)) {
+            return "DESC";
+        }
+        throw new IllegalArgumentException("order must be 'asc' or 'desc'");
+    }
+
+    private Map<String, String> loadAdvancementsForPlayer(String playerUuid,
+                                                          Set<String> filterKeys) throws SQLException {
         Map<String, String> result = new HashMap<>();
-        try (Connection conn = plugin.getDatabaseManager().getConnection()) {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT advancement_key, value FROM player_advancements WHERE player_uuid = ?"
-            )) {
-                ps.setString(1, playerUuid);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String key = rs.getString("advancement_key");
-                        byte[] valueBytes = rs.getBytes("value");
-                        String value = valueBytes != null
-                                ? new String(valueBytes, java.nio.charset.StandardCharsets.UTF_8)
-                                : null;
-                        result.put(key, value);
+        Set<String> filters = filterKeys != null && !filterKeys.isEmpty() ? new HashSet<>(filterKeys) : null;
+        StringBuilder sql = new StringBuilder("SELECT advancement_key, value FROM player_advancements WHERE player_uuid = ?");
+        List<String> orderedFilters = null;
+        if (filters != null) {
+            orderedFilters = new ArrayList<>(filters);
+            sql.append(" AND advancement_key IN (");
+            for (int i = 0; i < orderedFilters.size(); i++) {
+                if (i > 0) {
+                    sql.append(',');
+                }
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+
+        try (Connection conn = plugin.getDatabaseManager().getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            ps.setString(idx++, playerUuid);
+            if (orderedFilters != null) {
+                for (String key : orderedFilters) {
+                    ps.setString(idx++, key);
+                }
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String key = rs.getString("advancement_key");
+                    if (filters != null && !filters.contains(key)) {
+                        continue;
                     }
+                    byte[] valueBytes = rs.getBytes("value");
+                    String value = valueBytes != null
+                            ? new String(valueBytes, java.nio.charset.StandardCharsets.UTF_8)
+                            : null;
+                    result.put(key, value);
                 }
             }
         }
         return result;
     }
 
-    private Map<String, Long> loadStatsForPlayer(String playerUuid) throws SQLException {
+    private Map<String, Long> loadStatsForPlayer(String playerUuid,
+                                                 Set<String> filterKeys) throws SQLException {
         Map<String, Long> result = new HashMap<>();
-        try (Connection conn = plugin.getDatabaseManager().getConnection()) {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT stat_key, value FROM player_stats WHERE player_uuid = ?"
-            )) {
-                ps.setString(1, playerUuid);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String key = rs.getString("stat_key");
-                        long value = rs.getLong("value");
-                        result.put(key, value);
+        Set<String> filters = filterKeys != null && !filterKeys.isEmpty() ? new HashSet<>(filterKeys) : null;
+        StringBuilder sql = new StringBuilder("SELECT stat_key, value FROM player_stats WHERE player_uuid = ?");
+        List<String> orderedFilters = null;
+        if (filters != null) {
+            orderedFilters = new ArrayList<>(filters);
+            sql.append(" AND stat_key IN (");
+            for (int i = 0; i < orderedFilters.size(); i++) {
+                if (i > 0) {
+                    sql.append(',');
+                }
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+
+        try (Connection conn = plugin.getDatabaseManager().getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            ps.setString(idx++, playerUuid);
+            if (orderedFilters != null) {
+                for (String key : orderedFilters) {
+                    ps.setString(idx++, key);
+                }
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String key = rs.getString("stat_key");
+                    if (filters != null && !filters.contains(key)) {
+                        continue;
                     }
+                    long value = rs.getLong("value");
+                    result.put(key, value);
                 }
             }
         }
@@ -450,7 +529,8 @@ public class SocketServerManager {
                                             String entryId,
                                             String changeType,
                                             int page,
-                                            int pageSize) throws SQLException {
+                                            int pageSize,
+                                            String order) throws SQLException {
         if (page <= 0) page = 1;
         if (pageSize <= 0) pageSize = 50;
         if (pageSize > 500) pageSize = 500; // hard cap
@@ -458,6 +538,8 @@ public class SocketServerManager {
         if (singleDate != null && (startDate != null || endDate != null)) {
             throw new IllegalArgumentException("Provide either singleDate or startDate/endDate, not both");
         }
+
+        String orderClause = normalizeOrder(order);
 
         StringBuilder where = new StringBuilder(" WHERE 1=1");
         List<Object> params = new ArrayList<>();
@@ -506,8 +588,8 @@ public class SocketServerManager {
                 offset = 0; // reset if out of range to still return first page
                 page = 1;
             }
-            String sql = "SELECT id, timestamp, player_name, player_uuid, class_name, entry_id, entry_name, position, change_type, old_data, new_data, source_file_path, source_line, dimension_context " +
-                    "FROM mtr_logs" + where + " ORDER BY id DESC LIMIT ? OFFSET ?";
+                String sql = "SELECT id, timestamp, player_name, player_uuid, class_name, entry_id, entry_name, position, change_type, old_data, new_data, source_file_path, source_line, dimension_context " +
+                    "FROM mtr_logs" + where + " ORDER BY id " + orderClause + " LIMIT ? OFFSET ?";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 int idx = 1;
                 for (Object p : params) {
@@ -926,6 +1008,7 @@ public class SocketServerManager {
         private String key;
         private String playerUuid;
         private String playerName; // optional
+        private List<String> keys; // optional filter
 
         public PlayerIdentityRequest() {
         }
@@ -948,6 +1031,8 @@ public class SocketServerManager {
 
         public String getPlayerName() { return playerName; }
         public void setPlayerName(String playerName) { this.playerName = playerName; }
+        public List<String> getKeys() { return keys; }
+        public void setKeys(List<String> keys) { this.keys = keys; }
     }
 
     public static class MtrLogsQueryRequest implements AuthPayload {
@@ -962,6 +1047,7 @@ public class SocketServerManager {
         private String changeType; // optional
         private int page = 1;
         private int pageSize = 50;
+        private String order = "desc";
 
         public MtrLogsQueryRequest() {}
 
@@ -987,6 +1073,8 @@ public class SocketServerManager {
         public void setPage(int page) { this.page = page; }
         public int getPageSize() { return pageSize; }
         public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+        public String getOrder() { return order; }
+        public void setOrder(String order) { this.order = order; }
     }
 
     public static class MtrLogDetailRequest implements AuthPayload {
