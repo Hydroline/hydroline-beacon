@@ -2,7 +2,12 @@ package com.hydroline.beacon.socket;
 
 import com.corundumstudio.socketio.AckRequest;
 import com.corundumstudio.socketio.Configuration;
+import com.corundumstudio.socketio.HandshakeData;
+import com.corundumstudio.socketio.SocketIOClient;
 import com.corundumstudio.socketio.SocketIOServer;
+import com.corundumstudio.socketio.listener.ConnectListener;
+import com.corundumstudio.socketio.listener.DisconnectListener;
+import com.corundumstudio.socketio.listener.ExceptionListener;
 import com.hydroline.beacon.BeaconPlugin;
 import com.hydroline.beacon.config.PluginConfig;
 import com.hydroline.beacon.task.AdvancementsAndStatsScanner;
@@ -12,6 +17,9 @@ import org.bukkit.GameMode;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.http.HttpHeaders;
+import java.net.InetSocketAddress;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,6 +30,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
@@ -29,6 +39,7 @@ public class SocketServerManager {
 
     private final BeaconPlugin plugin;
     private SocketIOServer server;
+    private final Map<UUID, Long> connectionOpenAt = new ConcurrentHashMap<>();
 
     public SocketServerManager(BeaconPlugin plugin) {
         this.plugin = plugin;
@@ -40,6 +51,9 @@ public class SocketServerManager {
         Configuration configuration = new Configuration();
         configuration.setHostname("0.0.0.0");
         configuration.setPort(cfg.getPort());
+
+        // Hook exception listener for logging abnormal disconnects and other errors
+        configuration.setExceptionListener(new LoggingExceptionListener());
 
         server = new SocketIOServer(configuration);
         registerListeners();
@@ -58,6 +72,19 @@ public class SocketServerManager {
     }
 
     private void registerListeners() {
+        // Connection/Disconnection logging
+        server.addConnectListener((ConnectListener) client -> {
+            connectionOpenAt.put(client.getSessionId(), System.currentTimeMillis());
+            plugin.getLogger().info("[Socket.IO] Client connected: " + formatClientInfo(client));
+        });
+
+        server.addDisconnectListener((DisconnectListener) client -> {
+            Long started = connectionOpenAt.remove(client.getSessionId());
+            long duration = started != null ? (System.currentTimeMillis() - started) : -1L;
+            String durationStr = duration >= 0 ? (duration + "ms") : "unknown";
+            plugin.getLogger().info("[Socket.IO] Client disconnected: " + formatClientInfo(client) + ", sessionDuration=" + durationStr);
+        });
+
         server.addEventListener("force_update", ForceUpdateRequest.class,
                 (client, data, ackSender) -> {
                     if (!validateKey(data.getKey())) {
@@ -345,6 +372,70 @@ public class SocketServerManager {
                         sendError(ackSender, "DB_ERROR: " + e.getMessage());
                     }
                 });
+    }
+
+    private String formatClientInfo(SocketIOClient client) {
+        try {
+            HandshakeData hs = client.getHandshakeData();
+            InetSocketAddress addr = hs != null ? hs.getAddress() : null;
+            String ipPort = null;
+            if (addr != null) {
+                String ip = addr.getAddress() != null ? addr.getAddress().getHostAddress() : null;
+                Integer port = addr.getPort();
+                ipPort = (ip != null ? ip : "?") + ":" + port;
+            }
+            String transport = client.getTransport() != null ? client.getTransport().name() : null;
+            String ua = null;
+            try {
+                HttpHeaders headers = hs != null ? hs.getHttpHeaders() : null;
+                ua = headers != null ? headers.get("User-Agent") : null;
+            } catch (Throwable ignored) {
+                // ignore header extraction failures
+            }
+            Map<String, List<String>> params = hs != null ? hs.getUrlParams() : null;
+            String paramStr = params != null ? params.toString() : "{}";
+            String session = client.getSessionId() != null ? client.getSessionId().toString() : "?";
+            return "session=" + session + ", ip=" + (ipPort != null ? ipPort : "?") +
+                    ", transport=" + (transport != null ? transport : "?") +
+                    ", ua=" + (ua != null ? truncate(ua, 120) : "-") +
+                    ", params=" + truncate(paramStr, 200);
+        } catch (Throwable t) {
+            return "<client-info-unavailable>";
+        }
+    }
+
+    private String truncate(String s, int max) {
+        if (s == null) return null;
+        if (s.length() <= max) return s;
+        return s.substring(0, Math.max(0, max - 3)) + "...";
+    }
+
+    private class LoggingExceptionListener implements ExceptionListener {
+        @Override
+        public void onEventException(Exception e, List<Object> args, SocketIOClient client) {
+            plugin.getLogger().warning("[Socket.IO] Event handler exception: " + e.getMessage() + ", client=" + formatClientInfo(client));
+        }
+
+        @Override
+        public void onDisconnectException(Exception e, SocketIOClient client) {
+            plugin.getLogger().warning("[Socket.IO] Abnormal disconnect: " + e.getMessage() + ", client=" + formatClientInfo(client));
+        }
+
+        @Override
+        public void onConnectException(Exception e, SocketIOClient client) {
+            plugin.getLogger().warning("[Socket.IO] Connect exception: " + e.getMessage() + ", client=" + formatClientInfo(client));
+        }
+
+        @Override
+        public void onPingException(Exception e, SocketIOClient client) {
+            plugin.getLogger().warning("[Socket.IO] Ping exception: " + e.getMessage() + ", client=" + formatClientInfo(client));
+        }
+
+        @Override
+        public boolean exceptionCaught(ChannelHandlerContext ctx, Throwable e) {
+            plugin.getLogger().warning("[Socket.IO] Pipeline exception: " + e.getMessage());
+            return true; // already handled
+        }
     }
 
     private boolean validateKey(String key) {
