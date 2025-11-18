@@ -273,10 +273,8 @@
 - 约束与说明：
   - `singleDate` 与 `startDate/endDate` 互斥；`startDate/endDate` 与 `startAt/endAt` 也互斥。
   - `eventType` 可取：`JOIN`、`QUIT`、`ABNORMAL_QUIT`。其中 `ABNORMAL_QUIT` 表示上次服务器异常中断导致未收到 `PlayerQuitEvent`，在插件“启动完成”或“停服”阶段由后台补偿写入的退出事件（时间戳为补偿时刻）。
+  - `eventType` 大小写不敏感。
 
-9. get_status（心跳/状态）
-
-- `eventType` 大小写不敏感；支持 `JOIN`、`QUIT`、`ABNORMAL_QUIT`。
 - ACK 成功示例：
 
 ```json
