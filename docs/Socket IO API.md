@@ -385,6 +385,76 @@
   - `last_updated`：插件写入该行的本地时间戳，便于判断数据新旧。
   - 若查无记录返回 `success: false, error: "NOT_FOUND"`。
 
+12. get_player_balance（获取主记分板 mtr_balance）
+
+- 描述：使用 Bukkit API 从**主记分板**（主世界 ScoreboardManager 的 main scoreboard）读取目标玩家在 `mtr_balance` 目标上的分数，通常代表余额。
+- 请求：
+
+```json
+{ "key": "<key>", "playerName": "Aurora_Lemon" }
+```
+
+- ACK 成功示例：
+
+```json
+{
+  "success": true,
+  "player": "Aurora_Lemon",
+  "balance": 998843446
+}
+```
+
+- 说明：
+  - 该值与控制台命令 `scoreboard players get Aurora_Lemon mtr_balance` 读到的结果一致。
+  - 需要预先在主记分板上创建 `mtr_balance` 目标，并确保玩家有对应条目。
+  - 若 `playerName` 为空、记分板或目标不存在，会返回：`success: false, error: "INVALID_ARGUMENT: ..."`。
+
+13. set_player_balance（设置主记分板 mtr_balance）
+
+- 描述：使用 Bukkit API 将目标玩家在主记分板 `mtr_balance` 目标上的分数**直接设置为指定值**。
+- 请求：
+
+```json
+{ "key": "<key>", "playerName": "Aurora_Lemon", "amount": 1000 }
+```
+
+- ACK 成功示例：
+
+```json
+{
+  "success": true,
+  "player": "Aurora_Lemon",
+  "balance": 1000
+}
+```
+
+- 说明：
+  - `amount` 为 long 类型，但最终将按 Bukkit 记分板的 int 范围写入；如超出 `Integer.MIN_VALUE` / `Integer.MAX_VALUE` 会被截断到边界值。
+  - 若目标或玩家不存在，同样会返回 `INVALID_ARGUMENT` 错误信息。
+
+14. add_player_balance（增加主记分板 mtr_balance）
+
+- 描述：先从主记分板 `mtr_balance` 读取当前值，然后加上传入的 `amount`（可为负数），再写回，返回最终结果。
+- 请求：
+
+```json
+{ "key": "<key>", "playerName": "Aurora_Lemon", "amount": 500 }
+```
+
+- ACK 成功示例：
+
+```json
+{
+  "success": true,
+  "player": "Aurora_Lemon",
+  "balance": 998843946
+}
+```
+
+- 说明：
+  - `amount` 可为负数，表示扣减余额；内部会做 int 边界保护，最终写入值不会超过 Java int 范围。
+  - 行为等价于：当前值 = 通过 `get_player_balance` 读出；下一值 = 当前值 + amount；然后写回记分板。
+
 ## 错误与状态碼
 
 - INVALID_KEY：密钥校验失败（客户端应立即停止并报告凭证问题）。

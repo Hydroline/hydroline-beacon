@@ -390,6 +390,151 @@ public class SocketServerManager {
                         sendError(ackSender, "DB_ERROR: " + e.getMessage());
                     }
                 });
+
+        // mtr_balance: get/set/add player balance from main scoreboard objective
+        server.addEventListener("get_player_balance", PlayerBalanceRequest.class,
+                (client, data, ackSender) -> {
+                    if (!validateKey(data.getKey())) {
+                        sendError(ackSender, "INVALID_KEY");
+                        return;
+                    }
+                    try {
+                        Future<Long> future = Bukkit.getScheduler().callSyncMethod(plugin, () ->
+                                getPlayerBalanceOnMainScoreboard(data.getPlayerName()));
+                        Long value = future.get();
+                        Map<String, Object> resp = new HashMap<>();
+                        resp.put("success", true);
+                        resp.put("player", data.getPlayerName());
+                        resp.put("balance", value);
+                        ackSender.sendAckData(resp);
+                    } catch (InterruptedException | ExecutionException e) {
+                        sendError(ackSender, "INTERNAL_ERROR: " + e.getMessage());
+                    } catch (IllegalArgumentException e) {
+                        sendError(ackSender, "INVALID_ARGUMENT: " + e.getMessage());
+                    }
+                });
+
+        server.addEventListener("set_player_balance", PlayerBalanceUpdateRequest.class,
+                (client, data, ackSender) -> {
+                    if (!validateKey(data.getKey())) {
+                        sendError(ackSender, "INVALID_KEY");
+                        return;
+                    }
+                    try {
+                        Future<Long> future = Bukkit.getScheduler().callSyncMethod(plugin, () ->
+                                setPlayerBalanceOnMainScoreboard(data.getPlayerName(), data.getAmount()));
+                        Long value = future.get();
+                        Map<String, Object> resp = new HashMap<>();
+                        resp.put("success", true);
+                        resp.put("player", data.getPlayerName());
+                        resp.put("balance", value);
+                        ackSender.sendAckData(resp);
+                    } catch (InterruptedException | ExecutionException e) {
+                        sendError(ackSender, "INTERNAL_ERROR: " + e.getMessage());
+                    } catch (IllegalArgumentException e) {
+                        sendError(ackSender, "INVALID_ARGUMENT: " + e.getMessage());
+                    }
+                });
+
+        server.addEventListener("add_player_balance", PlayerBalanceUpdateRequest.class,
+                (client, data, ackSender) -> {
+                    if (!validateKey(data.getKey())) {
+                        sendError(ackSender, "INVALID_KEY");
+                        return;
+                    }
+                    try {
+                        Future<Long> future = Bukkit.getScheduler().callSyncMethod(plugin, () ->
+                                addPlayerBalanceOnMainScoreboard(data.getPlayerName(), data.getAmount()));
+                        Long value = future.get();
+                        Map<String, Object> resp = new HashMap<>();
+                        resp.put("success", true);
+                        resp.put("player", data.getPlayerName());
+                        resp.put("balance", value);
+                        ackSender.sendAckData(resp);
+                    } catch (InterruptedException | ExecutionException e) {
+                        sendError(ackSender, "INTERNAL_ERROR: " + e.getMessage());
+                    } catch (IllegalArgumentException e) {
+                        sendError(ackSender, "INVALID_ARGUMENT: " + e.getMessage());
+                    }
+                });
+    }
+
+    private long getPlayerBalanceOnMainScoreboard(String playerName) {
+        if (playerName == null || playerName.trim().isEmpty()) {
+            throw new IllegalArgumentException("playerName is required");
+        }
+        org.bukkit.scoreboard.ScoreboardManager manager = Bukkit.getScoreboardManager();
+        if (manager == null) {
+            throw new IllegalArgumentException("scoreboard manager not available");
+        }
+        org.bukkit.scoreboard.Scoreboard main = manager.getMainScoreboard();
+        if (main == null) {
+            throw new IllegalArgumentException("main scoreboard not available");
+        }
+        org.bukkit.scoreboard.Objective obj = main.getObjective("mtr_balance");
+        if (obj == null) {
+            throw new IllegalArgumentException("objective mtr_balance not found");
+        }
+        org.bukkit.OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(playerName);
+        if (offlinePlayer == null) {
+            throw new IllegalArgumentException("player not found: " + playerName);
+        }
+        org.bukkit.scoreboard.Score score = obj.getScore(offlinePlayer);
+        return score.getScore();
+    }
+
+    private long setPlayerBalanceOnMainScoreboard(String playerName, long amount) {
+        if (playerName == null || playerName.trim().isEmpty()) {
+            throw new IllegalArgumentException("playerName is required");
+        }
+        org.bukkit.scoreboard.ScoreboardManager manager = Bukkit.getScoreboardManager();
+        if (manager == null) {
+            throw new IllegalArgumentException("scoreboard manager not available");
+        }
+        org.bukkit.scoreboard.Scoreboard main = manager.getMainScoreboard();
+        if (main == null) {
+            throw new IllegalArgumentException("main scoreboard not available");
+        }
+        org.bukkit.scoreboard.Objective obj = main.getObjective("mtr_balance");
+        if (obj == null) {
+            throw new IllegalArgumentException("objective mtr_balance not found");
+        }
+        org.bukkit.OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(playerName);
+        if (offlinePlayer == null) {
+            throw new IllegalArgumentException("player not found: " + playerName);
+        }
+        org.bukkit.scoreboard.Score score = obj.getScore(offlinePlayer);
+        score.setScore((int) amount);
+        return score.getScore();
+    }
+
+    private long addPlayerBalanceOnMainScoreboard(String playerName, long delta) {
+        if (playerName == null || playerName.trim().isEmpty()) {
+            throw new IllegalArgumentException("playerName is required");
+        }
+        org.bukkit.scoreboard.ScoreboardManager manager = Bukkit.getScoreboardManager();
+        if (manager == null) {
+            throw new IllegalArgumentException("scoreboard manager not available");
+        }
+        org.bukkit.scoreboard.Scoreboard main = manager.getMainScoreboard();
+        if (main == null) {
+            throw new IllegalArgumentException("main scoreboard not available");
+        }
+        org.bukkit.scoreboard.Objective obj = main.getObjective("mtr_balance");
+        if (obj == null) {
+            throw new IllegalArgumentException("objective mtr_balance not found");
+        }
+        org.bukkit.OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(playerName);
+        if (offlinePlayer == null) {
+            throw new IllegalArgumentException("player not found: " + playerName);
+        }
+        org.bukkit.scoreboard.Score score = obj.getScore(offlinePlayer);
+        int current = score.getScore();
+        long next = current + delta;
+        if (next > Integer.MAX_VALUE) next = Integer.MAX_VALUE;
+        if (next < Integer.MIN_VALUE) next = Integer.MIN_VALUE;
+        score.setScore((int) next);
+        return score.getScore();
     }
 
     private String formatClientInfo(SocketIOClient client) {
@@ -1355,6 +1500,27 @@ public class SocketServerManager {
         public void setPage(int page) { this.page = page; }
         public int getPageSize() { return pageSize; }
         public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+    }
+
+    public static class PlayerBalanceRequest implements AuthPayload {
+        private String key;
+        private String playerName;
+
+        public PlayerBalanceRequest() {}
+
+        public String getKey() { return key; }
+        public void setKey(String key) { this.key = key; }
+        public String getPlayerName() { return playerName; }
+        public void setPlayerName(String playerName) { this.playerName = playerName; }
+    }
+
+    public static class PlayerBalanceUpdateRequest extends PlayerBalanceRequest {
+        private long amount;
+
+        public PlayerBalanceUpdateRequest() { super(); }
+
+        public long getAmount() { return amount; }
+        public void setAmount(long amount) { this.amount = amount; }
     }
 }
 
