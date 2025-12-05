@@ -61,7 +61,7 @@ public class SocketServerManager {
         server.start();
 
         plugin.getLogger().info("Socket.IO server started on port " + cfg.getPort());
-        plugin.getLogger().info("Socket.IO events registered: force_update, get_player_advancements, get_player_stats, list_online_players, get_server_time, get_player_mtr_logs, get_mtr_log_detail, get_player_sessions, get_player_nbt, lookup_player_identity, list_player_identities, execute_sql, get_status");
+        plugin.getLogger().info("Socket.IO events registered: force_update, get_player_advancements, get_player_stats, list_online_players, get_server_time, get_player_mtr_logs, get_mtr_log_detail, get_player_sessions, get_player_nbt, lookup_player_identity, list_player_identities, get_players_data, execute_sql, get_status");
     }
 
     public void stop() {
@@ -411,6 +411,96 @@ public class SocketServerManager {
                     }
                 });
 
+        // get_players_data: batch fetch balance/stats/advancements for multiple players
+        server.addEventListener("get_players_data", PlayersDataRequest.class,
+                (client, data, ackSender) -> {
+                    if (!validateKey(data.getKey())) {
+                        sendError(ackSender, "INVALID_KEY");
+                        return;
+                    }
+                    try {
+                        Set<String> uuids = new HashSet<>();
+                        if (data.getPlayerUuids() != null) {
+                            for (String u : data.getPlayerUuids()) {
+                                if (u != null && !u.trim().isEmpty()) {
+                                    uuids.add(u.trim());
+                                }
+                            }
+                        }
+                        if (data.getPlayerNames() != null) {
+                            for (String name : data.getPlayerNames()) {
+                                if (name != null && !name.trim().isEmpty()) {
+                                    String resolved = resolveUuidByName(name.trim());
+                                    if (resolved != null) {
+                                        uuids.add(resolved);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (uuids.size() > 200) {
+                            throw new IllegalArgumentException("Too many players; max 200 per request");
+                        }
+
+                        boolean needStats = data.getStatKeys() != null && !data.getStatKeys().isEmpty();
+                        boolean needAdv = data.getAdvancementKeys() != null && !data.getAdvancementKeys().isEmpty();
+                        boolean includeBalance = Boolean.TRUE.equals(data.getIncludeBalance());
+                        boolean includeBalanceAll = Boolean.TRUE.equals(data.getIncludeBalanceAll());
+
+                        if ((needStats || needAdv) && uuids.isEmpty()) {
+                            throw new IllegalArgumentException("playerUuids/playerNames required when requesting stats or advancements");
+                        }
+
+                        Map<String, Object> resp = new HashMap<>();
+
+                        if (includeBalance || includeBalanceAll) {
+                            List<String> balanceNames = new ArrayList<>();
+                            if (!includeBalanceAll) {
+                                if (data.getPlayerNames() != null) {
+                                    for (String name : data.getPlayerNames()) {
+                                        if (name != null && !name.trim().isEmpty()) {
+                                            balanceNames.add(name.trim());
+                                        }
+                                    }
+                                }
+                                if (balanceNames.isEmpty() && !uuids.isEmpty()) {
+                                    balanceNames.addAll(resolveNamesForUuids(uuids));
+                                }
+                                if (balanceNames.isEmpty()) {
+                                    throw new IllegalArgumentException("playerNames or playerUuids required when includeBalance is true");
+                                }
+                            }
+                            Future<List<Map<String, Object>>> future = Bukkit.getScheduler().callSyncMethod(plugin, () ->
+                                    collectBalancesMainScoreboard(includeBalanceAll ? null : balanceNames, includeBalanceAll));
+                            List<Map<String, Object>> balances = future.get();
+                            resp.put("balances", balances);
+                        }
+
+                        if (needStats) {
+                            Map<String, Map<String, Long>> stats = loadStatsForPlayers(uuids, new HashSet<>(data.getStatKeys()));
+                            resp.put("stats", stats);
+                        }
+
+                        if (needAdv) {
+                            Map<String, Map<String, String>> adv = loadAdvancementsForPlayers(uuids, new HashSet<>(data.getAdvancementKeys()));
+                            resp.put("advancements", adv);
+                        }
+
+                        resp.put("success", true);
+                        ackSender.sendAckData(resp);
+                    } catch (IllegalArgumentException e) {
+                        sendError(ackSender, "INVALID_ARGUMENT: " + e.getMessage());
+                    } catch (SQLException e) {
+                        sendError(ackSender, "DB_ERROR: " + e.getMessage());
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        sendError(ackSender, "INTERNAL_ERROR: interrupted");
+                    } catch (ExecutionException e) {
+                        Throwable cause = e.getCause();
+                        sendError(ackSender, "INTERNAL_ERROR: " + (cause != null ? cause.getMessage() : e.getMessage()));
+                    }
+                });
+
         // execute_sql: read-only SELECT/PRAGMA helper for admin/GraphQL bridge
         server.addEventListener("execute_sql", ExecuteSqlRequest.class,
                 (client, data, ackSender) -> {
@@ -597,6 +687,42 @@ public class SocketServerManager {
         if (next < Integer.MIN_VALUE) next = Integer.MIN_VALUE;
         score.setScore((int) next);
         return score.getScore();
+    }
+
+    private List<Map<String, Object>> collectBalancesMainScoreboard(List<String> names, boolean all) {
+        org.bukkit.scoreboard.ScoreboardManager manager = Bukkit.getScoreboardManager();
+        if (manager == null) {
+            throw new IllegalArgumentException("scoreboard manager not available");
+        }
+        org.bukkit.scoreboard.Scoreboard main = manager.getMainScoreboard();
+        if (main == null) {
+            throw new IllegalArgumentException("main scoreboard not available");
+        }
+        org.bukkit.scoreboard.Objective obj = main.getObjective("mtr_balance");
+        if (obj == null) {
+            throw new IllegalArgumentException("objective mtr_balance not found");
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>();
+        if (all) {
+            for (String entry : obj.getScoreboard().getEntries()) {
+                org.bukkit.scoreboard.Score score = obj.getScore(entry);
+                Map<String, Object> row = new HashMap<>();
+                row.put("player", entry);
+                row.put("balance", score.getScore());
+                rows.add(row);
+            }
+        } else if (names != null) {
+            for (String name : names) {
+                if (name == null || name.trim().isEmpty()) continue;
+                org.bukkit.scoreboard.Score score = obj.getScore(name.trim());
+                Map<String, Object> row = new HashMap<>();
+                row.put("player", name.trim());
+                row.put("balance", score.getScore());
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private String formatClientInfo(SocketIOClient client) {
@@ -1222,6 +1348,111 @@ public class SocketServerManager {
         return totals;
     }
 
+    private Map<String, Map<String, Long>> loadStatsForPlayers(Set<String> uuids, Set<String> keys) throws SQLException {
+        Set<String> normalizedPlayers = (uuids == null || uuids.isEmpty()) ? null : new HashSet<>(uuids);
+        Set<String> normalizedKeys = (keys == null || keys.isEmpty()) ? null : new HashSet<>(keys);
+
+        StringBuilder sql = new StringBuilder("SELECT player_uuid, stat_key, value FROM player_stats WHERE 1=1");
+        List<String> orderedPlayers = null;
+        if (normalizedPlayers != null) {
+            orderedPlayers = new ArrayList<>(normalizedPlayers);
+            sql.append(" AND player_uuid IN (");
+            for (int i = 0; i < orderedPlayers.size(); i++) {
+                if (i > 0) sql.append(',');
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+        List<String> orderedKeys = null;
+        if (normalizedKeys != null) {
+            orderedKeys = new ArrayList<>(normalizedKeys);
+            sql.append(" AND stat_key IN (");
+            for (int i = 0; i < orderedKeys.size(); i++) {
+                if (i > 0) sql.append(',');
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+
+        Map<String, Map<String, Long>> result = new HashMap<>();
+        try (Connection conn = plugin.getDatabaseManager().getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            if (orderedPlayers != null) {
+                for (String u : orderedPlayers) {
+                    ps.setString(idx++, u);
+                }
+            }
+            if (orderedKeys != null) {
+                for (String k : orderedKeys) {
+                    ps.setString(idx++, k);
+                }
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String uuid = rs.getString("player_uuid");
+                    String key = rs.getString("stat_key");
+                    long value = rs.getLong("value");
+                    result.computeIfAbsent(uuid, ignored -> new HashMap<>()).put(key, value);
+                }
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Map<String, String>> loadAdvancementsForPlayers(Set<String> uuids, Set<String> keys) throws SQLException {
+        Set<String> normalizedPlayers = (uuids == null || uuids.isEmpty()) ? null : new HashSet<>(uuids);
+        Set<String> normalizedKeys = (keys == null || keys.isEmpty()) ? null : new HashSet<>(keys);
+
+        StringBuilder sql = new StringBuilder("SELECT player_uuid, advancement_key, value FROM player_advancements WHERE 1=1");
+        List<String> orderedPlayers = null;
+        if (normalizedPlayers != null) {
+            orderedPlayers = new ArrayList<>(normalizedPlayers);
+            sql.append(" AND player_uuid IN (");
+            for (int i = 0; i < orderedPlayers.size(); i++) {
+                if (i > 0) sql.append(',');
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+        List<String> orderedKeys = null;
+        if (normalizedKeys != null) {
+            orderedKeys = new ArrayList<>(normalizedKeys);
+            sql.append(" AND advancement_key IN (");
+            for (int i = 0; i < orderedKeys.size(); i++) {
+                if (i > 0) sql.append(',');
+                sql.append('?');
+            }
+            sql.append(')');
+        }
+
+        Map<String, Map<String, String>> result = new HashMap<>();
+        try (Connection conn = plugin.getDatabaseManager().getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            if (orderedPlayers != null) {
+                for (String u : orderedPlayers) {
+                    ps.setString(idx++, u);
+                }
+            }
+            if (orderedKeys != null) {
+                for (String k : orderedKeys) {
+                    ps.setString(idx++, k);
+                }
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String uuid = rs.getString("player_uuid");
+                    String key = rs.getString("advancement_key");
+                    byte[] valueBytes = rs.getBytes("value");
+                    String value = valueBytes != null ? new String(valueBytes, java.nio.charset.StandardCharsets.UTF_8) : null;
+                    result.computeIfAbsent(uuid, ignored -> new HashMap<>()).put(key, value);
+                }
+            }
+        }
+        return result;
+    }
+
     private Map<String, Object> loadPlayerIdentities(Integer pageParam, Integer pageSizeParam) throws SQLException {
         int page = pageParam != null ? pageParam : 1;
         int pageSize = pageSizeParam != null ? pageSizeParam : 100;
@@ -1492,6 +1723,27 @@ public class SocketServerManager {
         return result;
     }
 
+    private List<String> resolveNamesForUuids(Set<String> uuids) throws SQLException {
+        List<String> names = new ArrayList<>();
+        if (uuids == null) return names;
+        try (Connection conn = plugin.getDatabaseManager().getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT player_name FROM player_identities WHERE player_uuid = ? ORDER BY last_updated DESC LIMIT 1")) {
+            for (String uuid : uuids) {
+                ps.setString(1, uuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String name = rs.getString(1);
+                        if (name != null && !name.isEmpty()) {
+                            names.add(name);
+                        }
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
     public interface AuthPayload {
         String getKey();
     }
@@ -1671,6 +1923,33 @@ public class SocketServerManager {
         public void setPage(int page) { this.page = page; }
         public int getPageSize() { return pageSize; }
         public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+    }
+
+    public static class PlayersDataRequest implements AuthPayload {
+        private String key;
+        private List<String> playerUuids;
+        private List<String> playerNames;
+        private List<String> statKeys;
+        private List<String> advancementKeys;
+        private Boolean includeBalance;
+        private Boolean includeBalanceAll;
+
+        public PlayersDataRequest() {}
+
+        public String getKey() { return key; }
+        public void setKey(String key) { this.key = key; }
+        public List<String> getPlayerUuids() { return playerUuids; }
+        public void setPlayerUuids(List<String> playerUuids) { this.playerUuids = playerUuids; }
+        public List<String> getPlayerNames() { return playerNames; }
+        public void setPlayerNames(List<String> playerNames) { this.playerNames = playerNames; }
+        public List<String> getStatKeys() { return statKeys; }
+        public void setStatKeys(List<String> statKeys) { this.statKeys = statKeys; }
+        public List<String> getAdvancementKeys() { return advancementKeys; }
+        public void setAdvancementKeys(List<String> advancementKeys) { this.advancementKeys = advancementKeys; }
+        public Boolean getIncludeBalance() { return includeBalance; }
+        public void setIncludeBalance(Boolean includeBalance) { this.includeBalance = includeBalance; }
+        public Boolean getIncludeBalanceAll() { return includeBalanceAll; }
+        public void setIncludeBalanceAll(Boolean includeBalanceAll) { this.includeBalanceAll = includeBalanceAll; }
     }
 
     public static class ExecuteSqlRequest implements AuthPayload {

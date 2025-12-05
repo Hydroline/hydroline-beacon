@@ -490,7 +490,50 @@
   - 排序：`last_updated` DESC（最新在前）。
   - `first_played` / `last_played` 可能为 `null`，表示无法从 NBT 解析。
 
-16. execute_sql（GraphQL/运维直通）
+16. get_players_data（多玩家汇总：余额 / 指定 stats / 指定 advancements）
+
+- 描述：一次性查询多个玩家的部分数据，可选择读取主记分板 `mtr_balance`、指定的 stats 字段、指定的 advancements 字段。
+- 请求：
+
+```json
+{
+  "key": "<key>",
+  "playerUuids": ["uuid-1", "uuid-2"],
+  "playerNames": ["Steve"],
+  "includeBalance": true,
+  "includeBalanceAll": false,
+  "statKeys": ["minecraft:custom:minecraft:jump", "minecraft:mined:stone"],
+  "advancementKeys": ["minecraft:story/root", "mod:x_custom_adv"]
+}
+```
+
+- ACK 成功示例：
+
+```json
+{
+  "success": true,
+  "balances": [
+    { "player": "Steve", "balance": 123 },
+    { "player": "Alex", "balance": 456 }
+  ],
+  "stats": {
+    "uuid-1": { "minecraft:custom:minecraft:jump": 42 }
+  },
+  "advancements": {
+    "uuid-1": { "minecraft:story/root": "{...json string...}" }
+  }
+}
+```
+
+- 约束与行为：
+  - 支持最多 200 名玩家（`playerUuids` + 解析自 `playerNames`）；超出返回 `INVALID_ARGUMENT`。
+  - `statKeys`/`advancementKeys` 为空则不返回对应段；仅当提供玩家列表时可查询 stats/advancements。
+  - 余额：
+    - `includeBalanceAll: true` 时返回主记分板 `mtr_balance` 上的全部条目（可能包含非玩家条目）。
+    - `includeBalance: true` 时需提供 `playerNames` 或 `playerUuids`；若仅给 UUID 会自动用 `player_identities` 解析名称后读取。
+  - stats/advancements：按提供的 UUID 集合过滤；值结构与单人接口一致（advancement 值为 JSON 字符串）。
+
+17. execute_sql（GraphQL/运维直通）
 
 - 描述：管理员用只读 SQL 执行入口，允许直接发出单条 `SELECT` / `PRAGMA` 语句，便于 GraphQL 代理或应急排查。
 - 请求：
