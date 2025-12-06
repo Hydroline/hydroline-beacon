@@ -159,7 +159,7 @@ public class SocketServerManager {
                         Map<String, Object> resp = new HashMap<>();
                         resp.put("success", true);
                         resp.put("player_uuid", uuid);
-                        resp.put("stats", stats);
+                        resp.put("stats", sanitizeJson(stats));
                         resp.put("total", result.get("total"));
                         resp.put("page", result.get("page"));
                         resp.put("page_size", result.get("page_size"));
@@ -482,7 +482,7 @@ public class SocketServerManager {
 
                         if (needStats) {
                             Map<String, Map<String, Long>> stats = loadStatsForPlayers(uuids, new HashSet<>(data.getStatKeys()));
-                            resp.put("stats", stats);
+                            resp.put("stats", sanitizeJson(stats));
                         }
 
                         if (needAdv) {
@@ -1350,6 +1350,40 @@ public class SocketServerManager {
             }
         }
         return totals;
+    }
+
+    private Object sanitizeJson(Object value) {
+        if (value == null) return null;
+        if (value instanceof Number || value instanceof Boolean || value instanceof String) {
+            return value;
+        }
+        if (value instanceof UUID) {
+            return value.toString();
+        }
+        if (value instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) value;
+            // Unwrap {"$type":..., "value": ...} wrappers to keep only the underlying value
+            if (map.size() == 2 && map.containsKey("$type") && map.containsKey("value")) {
+                return sanitizeJson(map.get("value"));
+            }
+            Map<String, Object> cleaned = new java.util.LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                Object key = entry.getKey();
+                if (key == null) continue;
+                cleaned.put(key.toString(), sanitizeJson(entry.getValue()));
+            }
+            return cleaned;
+        }
+        if (value instanceof Iterable<?>) {
+            Iterable<?> iterable = (Iterable<?>) value;
+            List<Object> cleaned = new ArrayList<>();
+            for (Object elem : iterable) {
+                cleaned.add(sanitizeJson(elem));
+            }
+            return cleaned;
+        }
+        // Fallback to string representation for any other types
+        return value.toString();
     }
 
     private Map<String, Map<String, Long>> loadStatsForPlayers(Set<String> uuids, Set<String> keys) throws SQLException {

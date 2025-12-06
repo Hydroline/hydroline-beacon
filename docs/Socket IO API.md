@@ -532,6 +532,7 @@
     - `includeBalanceAll: true` 时返回主记分板 `mtr_balance` 上的全部条目（可能包含非玩家条目）。
     - `includeBalance: true` 时需提供 `playerNames` 或 `playerUuids`；若仅给 UUID 会自动用 `player_identities` 解析名称后读取。
   - stats/advancements：按提供的 UUID 集合过滤；值结构与单人接口一致（advancement 值为 JSON 字符串）。
+  - **数据清洗**：`stats` 返回值已在服务端去除 `$type`/`value` 等包装，保证是标准 JSON 基础类型（字符串/数值/布尔/数组/对象），可直接写入下游存储（如 Prisma）。
 
 17. execute_sql（GraphQL/运维直通）
 
