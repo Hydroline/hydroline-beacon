@@ -3,6 +3,8 @@ package com.hydroline.beacon;
 import com.hydroline.beacon.config.ConfigManager;
 import com.hydroline.beacon.config.PluginConfig;
 import com.hydroline.beacon.listener.PlayerSessionListener;
+import com.hydroline.beacon.provider.actions.BeaconProviderActions;
+import com.hydroline.beacon.provider.actions.dto.BeaconPingResponse;
 import com.hydroline.beacon.provider.channel.BeaconProviderClient;
 import com.hydroline.beacon.socket.SocketServerManager;
 import com.hydroline.beacon.storage.DatabaseManager;
@@ -10,6 +12,7 @@ import com.hydroline.beacon.task.ScanScheduler;
 import com.hydroline.beacon.world.WorldFileAccess;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.sql.SQLException;
 
@@ -38,6 +41,7 @@ public class BeaconPlugin extends JavaPlugin {
 
         this.beaconProviderClient = new BeaconProviderClient(this);
         this.beaconProviderClient.start();
+        scheduleBeaconProviderStartupPing();
 
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
@@ -103,6 +107,35 @@ public class BeaconPlugin extends JavaPlugin {
 
     public BeaconProviderClient getBeaconProviderClient() {
         return beaconProviderClient;
+    }
+
+    private void scheduleBeaconProviderStartupPing() {
+        if (this.beaconProviderClient == null) {
+            return;
+        }
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (beaconProviderClient == null || !beaconProviderClient.isStarted()) {
+                    return;
+                }
+                cancel();
+                beaconProviderClient
+                        .sendAction(BeaconProviderActions.ping("startup"))
+                        .whenComplete((response, throwable) -> {
+                            if (throwable != null) {
+                                getLogger().warning("Beacon Provider channel ping failed: " + throwable.getMessage());
+                                return;
+                            }
+                            BeaconPingResponse payload = response.getPayload();
+                            if (response.isOk() && payload != null) {
+                                getLogger().info("Beacon Provider channel ready, latency=" + payload.getLatencyMs() + "ms");
+                            } else {
+                                getLogger().warning("Beacon Provider channel ping returned " + response.getResult() + ": " + response.getMessage());
+                            }
+                        });
+            }
+        }.runTaskTimer(this, 60L, 100L);
     }
 
     /**

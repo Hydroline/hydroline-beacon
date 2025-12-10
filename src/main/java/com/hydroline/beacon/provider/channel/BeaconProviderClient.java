@@ -1,187 +1,420 @@
 package com.hydroline.beacon.provider.channel;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hydroline.beacon.BeaconPlugin;
-import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
-import org.bukkit.plugin.messaging.PluginMessageListener;
-import org.bukkit.scheduler.BukkitTask;
+import com.hydroline.beacon.gateway.NettyGatewayConfig;
 
+import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
-import java.time.Duration;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.logging.Logger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 
 /**
- * 负责与 Beacon Provider Mod 的 Plugin Messaging Channel 通信，提供按 action 的请求/响应接口。
+ * Netty Gateway client that talks to the Forge/Fabric provider over TCP instead of Plugin Messaging.
  */
-public final class BeaconProviderClient implements PluginMessageListener {
-    public static final String CHANNEL_NAME = "hydroline:beacon_provider";
-    public static final int PROTOCOL_VERSION = 1;
+public final class BeaconProviderClient {
+    private static final int PROTOCOL_VERSION = 1;
+    private static final int CONNECT_TIMEOUT_MILLIS = 5000;
+    private static final long MAX_RECONNECT_DELAY_MS = 30_000L;
+    private static final Path GATEWAY_CONFIG_PATH = Paths.get("config", "hydroline", "beacon-provider.json");
 
     private final BeaconPlugin plugin;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, PendingRequest<?>> pendingRequests = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "beacon-gateway-client");
+        t.setDaemon(true);
+        return t;
+    });
+    private final Object writeLock = new Object();
+    private final AtomicLong pingSeq = new AtomicLong(1);
+
     private volatile boolean started;
+    private volatile boolean stopRequested;
+    private volatile NettyGatewayConfig gatewayConfig;
+    private volatile Socket socket;
+    private volatile DataInputStream input;
+    private volatile DataOutputStream output;
+    private volatile Thread readerThread;
+    private volatile GatewaySession session;
+    private volatile CompletableFuture<Void> handshakeFuture;
+    private volatile ScheduledFuture<?> handshakeTimeoutFuture;
+    private volatile ScheduledFuture<?> heartbeatFuture;
+    private volatile long reconnectDelayMs = 1000L;
 
     public BeaconProviderClient(BeaconPlugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
-        this.objectMapper = new ObjectMapper()
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
 
     public synchronized void start() {
         if (started) {
             return;
         }
-        Bukkit.getMessenger().registerOutgoingPluginChannel(plugin, CHANNEL_NAME);
-        Bukkit.getMessenger().registerIncomingPluginChannel(plugin, CHANNEL_NAME, this);
-        started = true;
-        plugin.getLogger().info("Beacon Provider channel registered: " + CHANNEL_NAME);
+        this.gatewayConfig = NettyGatewayConfig.load(GATEWAY_CONFIG_PATH, plugin.getLogger());
+        if (gatewayConfig == null || !gatewayConfig.isEnabled()) {
+            plugin.getLogger().warning("Beacon Provider gateway disabled (missing config or listenPort <= 0)");
+            return;
+        }
+        this.started = true;
+        this.stopRequested = false;
+        submitConnect(0L);
     }
 
     public synchronized void stop() {
-        if (!started) {
-            return;
-        }
-        started = false;
-        Bukkit.getMessenger().unregisterOutgoingPluginChannel(plugin, CHANNEL_NAME);
-        Bukkit.getMessenger().unregisterIncomingPluginChannel(plugin, CHANNEL_NAME, this);
-        pendingRequests.forEach((requestId, pending) -> pending.completeExceptionally(
-                new IllegalStateException("BeaconProviderClient stopped")));
-        pendingRequests.clear();
-        plugin.getLogger().info("Beacon Provider channel unregistered.");
+        this.stopRequested = true;
+        this.started = false;
+        cancelHeartbeat();
+        cancelHandshakeTimeout();
+        closeSocket();
+        executor.shutdownNow();
+        failAllPending(new IllegalStateException("Beacon Provider client stopped"));
     }
 
     public boolean isStarted() {
-        return started;
+        return started && session != null && socket != null;
     }
 
     public <T> CompletableFuture<BeaconActionResponse<T>> sendAction(BeaconActionCall<T> call) {
-        if (!started) {
-            throw new IllegalStateException("BeaconProviderClient has not been started yet");
-        }
         Objects.requireNonNull(call, "call");
-
+        if (!isStarted()) {
+            return failedFuture(new IllegalStateException("Beacon Provider gateway is not ready"));
+        }
         String requestId = RequestIdGenerator.next();
         PendingRequest<T> pending = new PendingRequest<>(call);
-        PendingRequest<?> previous = pendingRequests.put(requestId, pending);
-        if (previous != null) {
-            previous.completeExceptionally(new IllegalStateException("Duplicate requestId registered"));
-        }
+        pendingRequests.put(requestId, pending);
+        scheduleRequestTimeout(requestId, pending, call.getTimeout().toMillis());
 
-        ObjectNode payloadObject = preparePayload(call.getPayload());
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("protocolVersion", PROTOCOL_VERSION);
-        root.put("requestId", requestId);
-        root.put("action", call.getAction());
-        root.set("payload", payloadObject);
-
-        byte[] data;
         try {
-            data = objectMapper.writeValueAsBytes(root);
-        } catch (JsonProcessingException e) {
+            ObjectNode envelope = mapper.createObjectNode();
+            envelope.put("type", "request");
+            GatewaySession s = session;
+            if (s != null && s.connectionId() != null) {
+                envelope.put("connectionId", s.connectionId());
+            }
+            ObjectNode body = mapper.createObjectNode();
+            body.put("protocolVersion", PROTOCOL_VERSION);
+            body.put("requestId", requestId);
+            body.put("action", call.getAction());
+            body.set("payload", mapper.valueToTree(call.getPayload() == null ? mapper.createObjectNode() : call.getPayload()));
+            envelope.set("body", body);
+            sendEnvelope(envelope);
+        } catch (IOException e) {
             pendingRequests.remove(requestId);
-            throw new IllegalStateException("Failed to serialize beacon request", e);
+            pending.completeExceptionally(e);
+            handleConnectionLost(e);
         }
 
-        scheduleTimeout(requestId, pending, call.getTimeout());
-        dispatchMessage(data, requestId, pending);
         return pending.getFuture();
     }
 
-    private void dispatchMessage(byte[] data, String requestId, PendingRequest<?> pending) {
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            try {
-                Bukkit.getServer().sendPluginMessage(plugin, CHANNEL_NAME, data);
-            } catch (Exception ex) {
-                pendingRequests.remove(requestId);
-                pending.completeExceptionally(new IllegalStateException("Failed to dispatch plugin message", ex));
-            }
-        });
+    private void submitConnect(long delayMs) {
+        executor.schedule(this::connectOnce, Math.max(delayMs, 0L), TimeUnit.MILLISECONDS);
     }
 
-    private void scheduleTimeout(String requestId, PendingRequest<?> pending, Duration timeout) {
-        long timeoutTicks = Math.max(1L, (timeout.toMillis() + 49L) / 50L);
-        BukkitTask task = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+    private void connectOnce() {
+        if (stopRequested || gatewayConfig == null || !gatewayConfig.isEnabled()) {
+            return;
+        }
+        closeSocket();
+        try {
+            Socket s = new Socket();
+            s.connect(new InetSocketAddress(gatewayConfig.getListenAddress(), gatewayConfig.getListenPort()), CONNECT_TIMEOUT_MILLIS);
+            s.setTcpNoDelay(true);
+            this.socket = s;
+            this.input = new DataInputStream(s.getInputStream());
+            this.output = new DataOutputStream(s.getOutputStream());
+            this.handshakeFuture = new CompletableFuture<>();
+            startReaderThread();
+            sendHandshake();
+            scheduleHandshakeTimeout();
+        } catch (IOException e) {
+            handleConnectionLost(e);
+        }
+    }
+
+    private void startReaderThread() {
+        readerThread = new Thread(this::readLoop, "beacon-gateway-reader");
+        readerThread.setDaemon(true);
+        readerThread.start();
+    }
+
+    private void readLoop() {
+        try {
+            while (!stopRequested) {
+                DataInputStream in = this.input;
+                if (in == null) {
+                    break;
+                }
+                int length;
+                try {
+                    length = in.readInt();
+                } catch (IOException ex) {
+                    throw ex;
+                }
+                if (length <= 0) {
+                    continue;
+                }
+                byte[] payload = new byte[length];
+                in.readFully(payload);
+                JsonNode envelope = mapper.readTree(payload);
+                handleEnvelope(envelope);
+            }
+        } catch (IOException e) {
+            handleConnectionLost(e);
+        }
+    }
+
+    private void handleEnvelope(JsonNode envelope) {
+        String type = envelope.path("type").asText("");
+        JsonNode body = envelope.path("body");
+        switch (type) {
+            case "handshake_ack":
+                handleHandshakeAck(body);
+                break;
+            case "response":
+                handleResponse(body);
+                break;
+            case "error":
+                handleError(body);
+                break;
+            case "ping":
+                handlePing(body);
+                break;
+            case "pong":
+                break;
+            default:
+                if (plugin.getLogger().isLoggable(Level.FINE)) {
+                    plugin.getLogger().fine("Unknown gateway frame type: " + type);
+                }
+        }
+    }
+
+    private void handleHandshakeAck(JsonNode body) {
+        cancelHandshakeTimeout();
+        if (handshakeFuture != null && handshakeFuture.isDone()) {
+            return;
+        }
+        String connectionId = body.path("connectionId").asText(null);
+        long heartbeatInterval = body.path("heartbeatIntervalSeconds").asLong(30L);
+        String modVersion = body.path("modVersion").asText("unknown");
+        this.session = new GatewaySession(connectionId, heartbeatInterval);
+        this.reconnectDelayMs = 1000L;
+        if (handshakeFuture != null) {
+            handshakeFuture.complete(null);
+        }
+        plugin.getLogger().info("Beacon Gateway connected (connectionId=" + connectionId + ", modVersion=" + modVersion + ")");
+        scheduleHeartbeat(heartbeatInterval);
+    }
+
+    private void handleResponse(JsonNode body) {
+        String requestId = body.path("requestId").asText(null);
+        if (requestId == null) {
+            plugin.getLogger().warning("Gateway response missing requestId");
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        PendingRequest<Object> pending = (PendingRequest<Object>) pendingRequests.remove(requestId);
+        if (pending == null) {
+            plugin.getLogger().warning("Gateway response for unknown requestId=" + requestId);
+            return;
+        }
+        try {
+            int protocolVersion = body.path("protocolVersion").asInt(PROTOCOL_VERSION);
+            String resultRaw = body.path("result").asText("ERROR");
+            BeaconResultCode result = parseResult(resultRaw);
+            String message = body.path("message").asText("");
+            JsonNode payloadNode = body.path("payload");
+            Object payload = pending.deserializePayload(payloadNode);
+            BeaconActionResponse<Object> response = new BeaconActionResponse<>(protocolVersion, requestId, result, message, payload);
+            pending.complete(response);
+        } catch (Exception ex) {
+            pending.completeExceptionally(ex);
+        }
+    }
+
+    private void handleError(JsonNode body) {
+        String code = body.path("errorCode").asText("ERROR");
+        String message = body.path("message").asText("");
+        plugin.getLogger().warning("Beacon Gateway error: " + code + ", message=" + message);
+        if (handshakeFuture != null && !handshakeFuture.isDone()) {
+            handshakeFuture.completeExceptionally(new IllegalStateException(code + ": " + message));
+        }
+    }
+
+    private void handlePing(JsonNode body) {
+        ObjectNode envelope = mapper.createObjectNode();
+        envelope.put("type", "pong");
+        if (session != null && session.connectionId() != null) {
+            envelope.put("connectionId", session.connectionId());
+        }
+        envelope.set("body", body);
+        try {
+            sendEnvelope(envelope);
+        } catch (IOException e) {
+            handleConnectionLost(e);
+        }
+    }
+
+    private void sendHandshake() throws IOException {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("protocolVersion", PROTOCOL_VERSION);
+        body.put("clientId", plugin.getName().toLowerCase());
+        body.put("token", gatewayConfig.getAuthToken());
+        ArrayNode capabilities = mapper.createArrayNode();
+        capabilities.add("actions");
+        body.set("capabilities", capabilities);
+
+        ObjectNode envelope = mapper.createObjectNode();
+        envelope.put("type", "handshake");
+        envelope.set("body", body);
+        sendEnvelope(envelope);
+    }
+
+    private void scheduleHandshakeTimeout() {
+        cancelHandshakeTimeout();
+        int timeoutSeconds = Math.max(1, gatewayConfig.getHandshakeTimeoutSeconds());
+        handshakeTimeoutFuture = executor.schedule(() -> {
+            CompletableFuture<Void> future = this.handshakeFuture;
+            if (future != null && !future.isDone()) {
+                future.completeExceptionally(new TimeoutException("Gateway handshake timed out"));
+                handleConnectionLost(new IOException("Gateway handshake timeout"));
+            }
+        }, timeoutSeconds, TimeUnit.SECONDS);
+    }
+
+    private void scheduleHeartbeat(long heartbeatIntervalSeconds) {
+        cancelHeartbeat();
+        if (heartbeatIntervalSeconds <= 0) {
+            return;
+        }
+        heartbeatFuture = executor.scheduleAtFixedRate(() -> {
+            try {
+                ObjectNode body = mapper.createObjectNode();
+                body.put("seq", pingSeq.getAndIncrement());
+                ObjectNode envelope = mapper.createObjectNode();
+                envelope.put("type", "ping");
+                if (session != null && session.connectionId() != null) {
+                    envelope.put("connectionId", session.connectionId());
+                }
+                envelope.set("body", body);
+                sendEnvelope(envelope);
+            } catch (IOException e) {
+                handleConnectionLost(e);
+            }
+        }, heartbeatIntervalSeconds, heartbeatIntervalSeconds, TimeUnit.SECONDS);
+    }
+
+    private void cancelHeartbeat() {
+        if (heartbeatFuture != null) {
+            heartbeatFuture.cancel(true);
+            heartbeatFuture = null;
+        }
+    }
+
+    private void cancelHandshakeTimeout() {
+        if (handshakeTimeoutFuture != null) {
+            handshakeTimeoutFuture.cancel(true);
+            handshakeTimeoutFuture = null;
+        }
+    }
+
+    private void sendEnvelope(ObjectNode envelope) throws IOException {
+        byte[] data = mapper.writeValueAsBytes(envelope);
+        DataOutputStream out = this.output;
+        if (out == null) {
+            throw new IOException("Gateway connection is not open");
+        }
+        synchronized (writeLock) {
+            out.writeInt(data.length);
+            out.write(data);
+            out.flush();
+        }
+    }
+
+    private void handleConnectionLost(Throwable cause) {
+        if (stopRequested) {
+            return;
+        }
+        closeSocket();
+        failAllPending(cause != null ? cause : new IOException("Gateway disconnected"));
+        if (handshakeFuture != null && !handshakeFuture.isDone()) {
+            handshakeFuture.completeExceptionally(cause != null ? cause : new IOException("Gateway disconnected"));
+        }
+        long delay = reconnectDelayMs;
+        reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+        plugin.getLogger().warning("Beacon Gateway connection lost: " + (cause != null ? cause.getMessage() : "unknown") + ". Reconnecting in " + delay + "ms");
+        submitConnect(delay);
+    }
+
+    private void closeSocket() {
+        cancelHeartbeat();
+        cancelHandshakeTimeout();
+        this.session = null;
+        if (readerThread != null) {
+            readerThread.interrupt();
+            readerThread = null;
+        }
+        closeQuietly(input);
+        closeQuietly(output);
+        closeQuietly(socket);
+        this.input = null;
+        this.output = null;
+        this.socket = null;
+    }
+
+    private void closeQuietly(Closeable closeable) {
+        if (closeable == null) return;
+        try {
+            closeable.close();
+        } catch (IOException ignored) {}
+    }
+
+    private void failAllPending(Throwable cause) {
+        if (cause == null) {
+            cause = new IOException("Gateway connection closed");
+        }
+        for (Map.Entry<String, PendingRequest<?>> entry : pendingRequests.entrySet()) {
+            PendingRequest<?> pending = entry.getValue();
+            if (pending != null) {
+                pending.completeExceptionally(cause);
+            }
+        }
+        pendingRequests.clear();
+    }
+
+    private <T> CompletableFuture<T> failedFuture(Throwable throwable) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        future.completeExceptionally(throwable);
+        return future;
+    }
+
+    private void scheduleRequestTimeout(String requestId, PendingRequest<?> pending, long timeoutMillis) {
+        long delay = timeoutMillis > 0 ? timeoutMillis : 10_000L;
+        ScheduledFuture<?> future = executor.schedule(() -> {
             PendingRequest<?> removed = pendingRequests.remove(requestId);
             if (removed != null) {
                 removed.completeExceptionally(new TimeoutException("Beacon Provider request timed out: " + requestId));
             }
-        }, timeoutTicks);
-        pending.setTimeoutTask(task);
-    }
-
-    private ObjectNode preparePayload(Object payload) {
-        if (payload == null) {
-            return objectMapper.createObjectNode();
-        }
-        if (payload instanceof ObjectNode) {
-            return (ObjectNode) payload;
-        }
-        JsonNode node = objectMapper.valueToTree(payload);
-        if (node != null && node.isObject()) {
-            return (ObjectNode) node;
-        }
-        return objectMapper.createObjectNode();
-    }
-
-    @Override
-    public void onPluginMessageReceived(String channel, Player player, byte[] message) {
-        if (!CHANNEL_NAME.equals(channel)) {
-            return;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(message);
-            String requestId = root.path("requestId").asText(null);
-            if (requestId == null) {
-                getLogger().warning("Received beacon response without requestId");
-                return;
-            }
-            @SuppressWarnings("unchecked")
-            PendingRequest<Object> pending = (PendingRequest<Object>) pendingRequests.remove(requestId);
-            if (pending == null) {
-                getLogger().warning("Received beacon response for unknown requestId=" + requestId);
-                return;
-            }
-
-            int protocolVersion = root.path("protocolVersion").asInt(-1);
-            String resultRaw = root.path("result").asText("ERROR");
-            BeaconResultCode result = parseResult(resultRaw);
-            String messageText = root.path("message").asText("");
-            JsonNode payloadNode = root.path("payload");
-            Object payload = null;
-            if (payloadNode != null && !payloadNode.isMissingNode() && !payloadNode.isNull()) {
-                payload = deserializePayload(payloadNode, pending.getCall());
-            }
-
-            BeaconActionResponse<Object> response = new BeaconActionResponse<>(
-                    protocolVersion,
-                    requestId,
-                    result,
-                    messageText,
-                    payload
-            );
-            pending.complete(response);
-        } catch (IOException ex) {
-            getLogger().warning("Failed to parse beacon response: " + ex.getMessage());
-        }
-    }
-
-    private Object deserializePayload(JsonNode payloadNode, BeaconActionCall<?> call) {
-        Class<?> raw = call.getResponseType().getRawClass();
-        if (raw == Void.class || raw == Void.TYPE) {
-            return null;
-        }
-        return objectMapper.convertValue(payloadNode, call.getResponseType());
+        }, delay, TimeUnit.MILLISECONDS);
+        pending.setTimeoutTask(future);
     }
 
     private BeaconResultCode parseResult(String raw) {
@@ -192,28 +425,38 @@ public final class BeaconProviderClient implements PluginMessageListener {
         }
     }
 
-    private Logger getLogger() {
-        return plugin.getLogger();
+    private static final class GatewaySession {
+        private final String connectionId;
+        private final long heartbeatIntervalSeconds;
+
+        private GatewaySession(String connectionId, long heartbeatIntervalSeconds) {
+            this.connectionId = connectionId;
+            this.heartbeatIntervalSeconds = heartbeatIntervalSeconds;
+        }
+
+        public String connectionId() {
+            return connectionId;
+        }
+
+        public long heartbeatIntervalSeconds() {
+            return heartbeatIntervalSeconds;
+        }
     }
 
-    private static final class PendingRequest<T> {
+    private final class PendingRequest<T> {
         private final BeaconActionCall<T> call;
         private final CompletableFuture<BeaconActionResponse<T>> future = new CompletableFuture<>();
-        private BukkitTask timeoutTask;
+        private ScheduledFuture<?> timeoutTask;
 
         private PendingRequest(BeaconActionCall<T> call) {
             this.call = call;
-        }
-
-        public BeaconActionCall<T> getCall() {
-            return call;
         }
 
         public CompletableFuture<BeaconActionResponse<T>> getFuture() {
             return future;
         }
 
-        public void setTimeoutTask(BukkitTask timeoutTask) {
+        public void setTimeoutTask(ScheduledFuture<?> timeoutTask) {
             this.timeoutTask = timeoutTask;
         }
 
@@ -227,9 +470,20 @@ public final class BeaconProviderClient implements PluginMessageListener {
             future.completeExceptionally(throwable);
         }
 
+        public Object deserializePayload(JsonNode payloadNode) {
+            if (payloadNode == null || payloadNode.isMissingNode() || payloadNode.isNull()) {
+                return null;
+            }
+            Class<?> raw = call.getResponseType().getRawClass();
+            if (raw == Void.class || raw == Void.TYPE) {
+                return null;
+            }
+            return mapper.convertValue(payloadNode, call.getResponseType());
+        }
+
         private void cancelTimeout() {
             if (timeoutTask != null) {
-                timeoutTask.cancel();
+                timeoutTask.cancel(true);
                 timeoutTask = null;
             }
         }

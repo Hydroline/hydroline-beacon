@@ -642,6 +642,7 @@ sio.emit('get_server_time', {'key': '...'}, callback=ack)
 4. 详细列出 `INVALID_KEY`、`DB_ERROR`、`INTERNAL_ERROR` 等错误码。
 5. 增加客户端示例（Node/Python）并附带 ACK 超时建议。
 6. 新增 `get_player_mtr_logs`/`get_mtr_log_detail`/`get_player_sessions` 的规范与示例。
+
 ## Beacon Provider (MTR) 透传事件（New）
 
 以下事件直接调用 Beacon Provider Mod 的 Channel Action。所有成功响应都会包含：`success`、`result`（Provider `ResultCode`）、`message`、`request_id` 以及 `payload`（即 Provider 返回体）。若 Provider 端暂未实现目标 action，会返回 `result = INVALID_ACTION`。
