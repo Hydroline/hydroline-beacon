@@ -10,14 +10,17 @@ import com.corundumstudio.socketio.listener.DisconnectListener;
 import com.corundumstudio.socketio.listener.ExceptionListener;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hydroline.beacon.BeaconPlugin;
 import com.hydroline.beacon.config.PluginConfig;
 import com.hydroline.beacon.mtr.MtrCategory;
 import com.hydroline.beacon.provider.actions.BeaconProviderActions;
 import com.hydroline.beacon.provider.channel.BeaconActionCall;
+import com.hydroline.beacon.provider.channel.BeaconActionResponse;
 import com.hydroline.beacon.provider.channel.BeaconProviderClient;
 import com.hydroline.beacon.task.AdvancementsAndStatsScanner;
 import com.hydroline.beacon.task.MtrLogsScanner;
+import com.hydroline.beacon.util.MtrMessagePackDecoder;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.World;
@@ -33,8 +36,11 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -42,11 +48,14 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class SocketServerManager {
 
     private final BeaconPlugin plugin;
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+    private static final String[] RAILWAY_PAYLOAD_KEYS = new String[]{"stations", "platforms", "routes", "depots"};
     private SocketIOServer server;
     private final Map<UUID, Long> connectionOpenAt = new ConcurrentHashMap<>();
 
@@ -60,6 +69,10 @@ public class SocketServerManager {
         Configuration configuration = new Configuration();
         configuration.setHostname("0.0.0.0");
         configuration.setPort(cfg.getPort());
+        // The provider snapshot payloads can be multi-megabytes; increase frame/content limits accordingly.
+        final int mtrPayloadLimit = 32 * 1024 * 1024;
+        configuration.setMaxHttpContentLength(mtrPayloadLimit);
+        configuration.setMaxFramePayloadLength(mtrPayloadLimit);
 
         // Hook exception listener for logging abnormal disconnects and other errors
         configuration.setExceptionListener(new LoggingExceptionListener());
@@ -69,7 +82,7 @@ public class SocketServerManager {
         server.start();
 
         plugin.getLogger().info("Socket.IO server started on port " + cfg.getPort());
-        plugin.getLogger().info("Socket.IO events registered: force_update, get_player_advancements, get_player_stats, list_online_players, get_server_time, beacon_ping, get_mtr_network_overview, get_mtr_route_detail, list_mtr_nodes_paginated, list_mtr_depots, list_mtr_fare_areas, get_mtr_station_timetable, list_mtr_stations, get_mtr_route_trains, get_mtr_depot_trains, get_player_mtr_logs, get_mtr_log_detail, get_player_sessions, get_player_nbt, lookup_player_identity, list_player_identities, get_players_data, execute_sql, query_mtr_entities, get_status");
+        plugin.getLogger().info("Socket.IO events registered: force_update, get_player_advancements, get_player_stats, list_online_players, get_server_time, beacon_ping, get_mtr_network_overview, get_mtr_route_detail, list_mtr_nodes_paginated, list_mtr_depots, list_mtr_fare_areas, get_mtr_station_timetable, list_mtr_stations, get_mtr_route_trains, get_mtr_depot_trains, get_mtr_railway_snapshot, get_player_mtr_logs, get_mtr_log_detail, get_player_sessions, get_player_nbt, lookup_player_identity, list_player_identities, get_players_data, execute_sql, query_mtr_entities, get_status");
     }
 
     public void stop() {
@@ -327,6 +340,15 @@ public class SocketServerManager {
                         return;
                     }
                     forwardBeaconAction(ackSender, BeaconProviderActions.getDepotTrains(data.getDimension(), data.getDepotId()));
+                });
+
+        server.addEventListener("get_mtr_railway_snapshot", MtrRailwaySnapshotRequest.class,
+                (client, data, ackSender) -> {
+                    if (!validateKey(data.getKey())) {
+                        sendError(ackSender, "INVALID_KEY");
+                        return;
+                    }
+                    forwardRailwaySnapshotAction(ackSender, BeaconProviderActions.getRailwaySnapshot(data.getDimension()));
                 });
 
         // get_player_mtr_logs: list MTR logs with optional filters & pagination
@@ -975,6 +997,86 @@ public class SocketServerManager {
             resp.put("payload", response.getPayload());
             ackSender.sendAckData(resp);
         });
+    }
+
+    private void forwardRailwaySnapshotAction(AckRequest ackSender, BeaconActionCall<ObjectNode> call) {
+        BeaconProviderClient client = plugin.getBeaconProviderClient();
+        if (client == null || !client.isStarted()) {
+            sendError(ackSender, "BEACON_PROVIDER_OFFLINE");
+            return;
+        }
+        try {
+            BeaconActionResponse<ObjectNode> response = client.sendAction(call).get(10, TimeUnit.SECONDS);
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("success", response.isOk());
+            resp.put("result", response.getResult().name());
+            resp.put("message", response.getMessage());
+            resp.put("request_id", response.getRequestId());
+            List<Map<String, Object>> snapshots = buildRailwaySnapshots(response.getPayload());
+            resp.put("snapshots", snapshots);
+            ackSender.sendAckData(resp);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            sendError(ackSender, "BEACON_PROVIDER_ERROR: interrupted");
+        } catch (ExecutionException ex) {
+            String msg = getRootMessage(ex.getCause() != null ? ex.getCause() : ex);
+            plugin.getLogger().warning("Beacon Provider action failed: " + msg);
+            sendError(ackSender, "BEACON_PROVIDER_ERROR: " + msg);
+        } catch (TimeoutException ex) {
+            plugin.getLogger().warning("Beacon Provider action timed out");
+            sendError(ackSender, "BEACON_PROVIDER_ERROR: timeout");
+        }
+    }
+
+    private List<Map<String, Object>> buildRailwaySnapshots(JsonNode payload) {
+        if (payload == null || !payload.has("snapshots") || !payload.get("snapshots").isArray()) {
+            return Collections.emptyList();
+        }
+        List<Map<String, Object>> snapshots = new ArrayList<>();
+        for (JsonNode snapshotNode : payload.get("snapshots")) {
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("dimension", snapshotNode.path("dimension").asText(null));
+            snapshot.put("length", snapshotNode.has("length") ? snapshotNode.get("length").asLong() : null);
+            snapshot.put("payload", decodeRailwayPayload(snapshotNode.path("payload")));
+            snapshots.add(snapshot);
+        }
+        return snapshots;
+    }
+
+    private Map<String, Object> decodeRailwayPayload(JsonNode payloadNode) {
+        if (payloadNode == null || !payloadNode.isTextual()) {
+            return Collections.emptyMap();
+        }
+        String encoded = payloadNode.asText();
+        if (encoded.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        try {
+            byte[] decodedBytes = Base64.getDecoder().decode(encoded);
+            Object decoded = MtrMessagePackDecoder.decode(decodedBytes);
+            return filterRailwayPayload(decoded);
+        } catch (IllegalArgumentException | MtrMessagePackDecoder.MtrMessagePackException ex) {
+            plugin.getLogger().warning("Failed to decode MTR snapshot from provider: " + ex.getMessage());
+            return Collections.emptyMap();
+        }
+    }
+
+    private Map<String, Object> filterRailwayPayload(Object decoded) {
+        if (!(decoded instanceof Map)) {
+            return Collections.emptyMap();
+        }
+        Map<?, ?> raw = (Map<?, ?>) decoded;
+        Map<String, Object> filtered = new LinkedHashMap<>();
+        for (String key : RAILWAY_PAYLOAD_KEYS) {
+            if (raw.containsKey(key)) {
+                filtered.put(key, raw.get(key));
+            }
+        }
+        Object lastDeployed = raw.get("last_deployed");
+        if (lastDeployed != null) {
+            filtered.put("last_deployed", lastDeployed);
+        }
+        return filtered;
     }
 
     private boolean isNullOrEmpty(String value) {
@@ -2173,6 +2275,31 @@ public class SocketServerManager {
 
         public void setDepotId(long depotId) {
             this.depotId = depotId;
+        }
+    }
+
+    public static class MtrRailwaySnapshotRequest implements AuthPayload {
+        private String key;
+        private String dimension;
+
+        public MtrRailwaySnapshotRequest() {
+        }
+
+        @Override
+        public String getKey() {
+            return key;
+        }
+
+        public void setKey(String key) {
+            this.key = key;
+        }
+
+        public String getDimension() {
+            return dimension;
+        }
+
+        public void setDimension(String dimension) {
+            this.dimension = dimension;
         }
     }
 

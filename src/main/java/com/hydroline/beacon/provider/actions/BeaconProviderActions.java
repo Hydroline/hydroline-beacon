@@ -111,6 +111,14 @@ public final class BeaconProviderActions {
         return BeaconActionCall.of("mtr:get_depot_trains", payload, MtrDepotTrainsResponse.class);
     }
 
+    public static BeaconActionCall<ObjectNode> getRailwaySnapshot(String dimension) {
+        ObjectNode payload = objectNode();
+        if (!isNullOrEmpty(dimension)) {
+            payload.put("dimension", dimension);
+        }
+        return BeaconActionCall.of("mtr:get_railway_snapshot", payload, ObjectNode.class);
+    }
+
     private static ObjectNode objectNode() {
         return JSON.objectNode();
     }

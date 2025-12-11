@@ -537,7 +537,7 @@
   - stats/advancements：按提供的 UUID 集合过滤；值结构与单人接口一致（advancement 值为 JSON 字符串）。
   - **数据清洗**：`stats` 返回值已在服务端去除 `$type`/`value` 等包装，保证是标准 JSON 基础类型（字符串/数值/布尔/数组/对象），可直接写入下游存储（如 Prisma）。
 
-18. query_mtr_entities（MTR world 数据查询）
+17. query_mtr_entities（MTR world 数据查询）
 
 - 描述：提供 `world/mtr` 所有非 logs 结构化表（`mtr_depots`、`mtr_platforms`、`mtr_rails`、`mtr_routes`、`mtr_signal_blocks`、`mtr_stations`）的过滤 + 分页查询入口。GraphQL/运维服务可通过本事件直接拉取 `payload`（JSON）字段并在服务端多表联查，而无需手动编写 SQL。
 - 请求：
@@ -597,7 +597,110 @@
   - `includePayload` 控制是否在返回结果中携带 `payload`（默认 `true`）。`payload` 为 JSON 结构，由插件在扫描时写入，GraphQL 可直接当作对象使用。
   - `rows` 中的 `last_updated` 对应数据库更新（进程最后一次扫描）时间戳。
 
-18. execute_sql（GraphQL/运维直通）
+18. get_mtr_railway_snapshot（MTR Railway Data）
+    > 此事件需要 Beacon Provider 已配置
+
+- 透传 `mtr:get_railway_snapshot`，将 Provider 返回的 Base64 MessagePack 快照解码并过滤，只把 `stations`/`platforms`/`routes`/`depots` 四个结构返回给客户端，可直接用于后台 GraphQL 多表联查。
+- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld" }`（`dimension` 可选，缺省将返回所有维度快照）。
+- 响应：`payload.snapshots[*]`，每条包含：
+  - `dimension`：维度 ID；
+  - `length`：原始 MessagePack 字节数；
+  - `payload`：包含 `stations`/`platforms`/`routes`/`depots` 四个数组；原先的 `signalBlocks`、`rails`、`sidings` 等额外集合会被剔除。
+  - `payload.last_deployed`：该维度快照在 Provider 端最后一次部署的毫秒时间戳，方便客户端判断缓存是否过期。
+- 面向 TypeScript 的响应类型示例：
+
+```ts
+type GetMtrRailwaySnapshotAck = {
+  success: true;
+  result: "OK" | "NOT_READY" | "FAIL";
+  message: string;
+  request_id: string;
+  snapshots: RailwaySnapshotEntry[];
+};
+
+type RailwaySnapshotEntry = {
+  dimension: string;
+  length: number;
+  payload: RailwayDataPayload;
+};
+
+type RailwayDataPayload = {
+  stations: StationRecord[];
+  platforms: PlatformRecord[];
+  routes: RouteRecord[];
+  depots: DepotRecord[];
+  last_deployed: number;
+};
+```
+
+- 样例响应（参考 `tests/output/mtr_railway_snapshot.json`）：
+
+```json
+{
+  "success": true,
+  "result": "OK",
+  "message": "",
+  "request_id": "5paey5vm3efi",
+  "snapshots": [
+    {
+      "dimension": "minecraft:overworld",
+      "length": 3542432,
+      "payload": {
+        "stations": [
+          {
+            "id": -5906422091125720000,
+            "name": "华氢政法大学|Huaqing Univsersity...",
+            "transport_mode": "TRAIN",
+            "zone": 0,
+            "x_min": 965,
+            "z_min": 7085,
+            "x_max": 1168,
+            "z_max": 7343,
+            "color": 16020486,
+            "exits": { "A1": [], "D1": [] }
+          }
+        ],
+        "platforms": [
+          {
+            "id": -3067077897881660000,
+            "station_id": -5906422091125720000,
+            "pos_1": 1234567890123456000,
+            "pos_2": 1234567890123456001,
+            "name": "A1",
+            "route_ids": [1234567890123450000],
+            "dwell_time": 40
+          }
+        ],
+        "routes": [
+          {
+            "id": -8025833442643551000,
+            "name": "KOKYU Shuttle",
+            "platform_ids": [-3067077897881660000],
+            "route_type": "NORMAL",
+            "transport_mode": "TRAIN"
+          }
+        ],
+        "depots": [
+          {
+            "id": -5921335825326998000,
+            "name": "广急SY普通场1",
+            "color": 4037110,
+            "route_ids": [],
+            "deploy_index": 0
+          }
+        ],
+        "last_deployed": 28835
+      }
+    }
+  ]
+}
+```
+
+- 说明：
+  - `stations/platforms/routes/depots` 的每个元素都对应 `SerializedDataBase` 的字段（如 `name`, `color`, `route_ids`, `exits`），客户端可直接使用这些结构或者根据 `id` 交叉引用。
+  - `payload.last_deployed` 指示整个维度快照的时间戳；如果客户端存储了先前的 `last_deployed`，只有当新的时间戳更大时才需要更新缓存或重新绘制拓扑。
+
+19. execute_sql（GraphQL/运维直通）
 
 - 描述：管理员用只读 SQL 执行入口，允许直接发出单条 `SELECT` / `PRAGMA` 语句，便于 GraphQL 代理或应急排查。
 - 请求：
@@ -705,80 +808,3 @@ sio.emit('get_server_time', {'key': '...'}, callback=ack)
 4. 详细列出 `INVALID_KEY`、`DB_ERROR`、`INTERNAL_ERROR` 等错误码。
 5. 增加客户端示例（Node/Python）并附带 ACK 超时建议。
 6. 新增 `get_player_mtr_logs`/`get_mtr_log_detail`/`get_player_sessions` 的规范与示例。
-
-## Beacon Provider (MTR) 透传事件（New）
-
-以下事件直接调用 Beacon Provider Mod 的 Channel Action。所有成功响应都会包含：`success`、`result`（Provider `ResultCode`）、`message`、`request_id` 以及 `payload`（即 Provider 返回体）。若 Provider 端暂未实现目标 action，会返回 `result = INVALID_ACTION`。
-
-### beacon_ping
-
-- 检查 Bukkit ↔ Provider 通道延迟。
-- 请求：`{ "key": "<key>", "echo": "optional" }`
-- 响应示例：
-
-```json
-{
-  "success": true,
-  "result": "OK",
-  "request_id": "1ab2c3d4e5f6",
-  "payload": {
-    "echo": "web",
-    "receivedAt": 1733616000000,
-    "latencyMs": 8
-  }
-}
-```
-
-### get_mtr_network_overview
-
-- 透传 `mtr:list_network_overview`，返回维度 → 线路/车厂/收费区概览。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld" }`（`dimension` 可选，缺省表示全部维度）。
-- 响应：`payload.dimensions[*]` 结构与 Provider `DimensionOverview` 一致。
-
-### get_mtr_route_detail
-
-- 透传 `mtr:get_route_detail`，返回线路节点序列。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld", "routeId": 123 }`。
-- 响应：`payload.dimension`, `payload.routeId`, `payload.nodes[*]`（含 `x/y/z`, `railType`, `platformSegment`, `stationId` 等）。
-
-### list_mtr_nodes_paginated
-
-- 透传 `mtr:list_nodes_paginated`，同步指定维度的所有节点。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld", "cursor": "optional", "limit": 512 }`，`limit` 允许 1-2048。
-- 响应：`payload.nodes`, `payload.nextCursor`, `payload.hasMore`。
-
-### list_mtr_depots
-
-- 透传 `mtr:list_depots`，返回车厂与班表。`dimension` 可选。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld" }`
-- 响应：`payload.depots[*]`（见 Provider DTO）。
-
-### list_mtr_fare_areas
-
-- 透传 `mtr:list_fare_areas`，返回站点/收费区边界。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld" }`
-- 响应：`payload.fareAreas[*]`。
-
-### get_mtr_station_timetable
-
-- 透传 `mtr:get_station_timetable`，查看站/站台时刻表和延误。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld", "stationId": 456, "platformId": 789 }`（`platformId` 可选）。
-- 响应：`payload.platforms[*].entries[*]` 包含 `routeId`、`arrivalMillis`、`delayMillis` 等。
-
-### list_mtr_stations
-
-- 透传 `mtr:list_stations`，返回指定维度下所有站点、站台与换乘线路。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld" }`
-- 响应：`payload.stations[*]`（`stationId`, `name`, `zone`, `bounds`, `interchangeRouteIds`, `platforms[*]`）。每个站台项包含 `platformId/platformName/routeIds/depotId`，可直接写入本地缓存供地图渲染。
-
-### get_mtr_route_trains
-
-- 透传 `mtr:get_route_trains`，查询某条线路上实时运行的列车。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld", "routeId": 123 }`
-- 响应：`payload.trains[*]`，结构参考 `MtrDtos.TrainStatus`：包含 `trainUuid`, `routeId`, `depotId`, `currentStationId`, `nextStationId`, `segmentCategory`, `progress`、以及当前位置节点（`node`）。Provider 当前尚未返回延误与节点坐标（字段为 `null`），但 `trainUuid`/站点/进度均为实时数据。
-
-### get_mtr_depot_trains
-
-- 透传 `mtr:get_depot_trains`，查看某车厂关联线路的实时列车列表。
-- 请求：`{ "key": "<key>", "dimension": "minecraft:overworld", "depotId": 7 }`
-- 响应：`payload.trains[*]` 同上，额外顶层字段 `depotId` 表示查询入口，便于列控中心 UI 展示。“列车-线路-车厂”之间的映射已由 Provider 计算好。

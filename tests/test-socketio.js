@@ -21,7 +21,8 @@ async function main() {
   const key = requireEnv("BEACON_KEY");
   const playerUuid = process.env.BEACON_PLAYER_UUID;
   const playerName = process.env.BEACON_PLAYER_NAME;
-  const mtrDimension = process.env.BEACON_MTR_DIMENSION || "minecraft:overworld";
+  const mtrDimension =
+    process.env.BEACON_MTR_DIMENSION || "minecraft:overworld";
   const outDir =
     process.env.OUTPUT_DIR || path.resolve(process.cwd(), "output");
   await prepareOutputDir(outDir);
@@ -179,13 +180,7 @@ function envLong(name) {
   return parsed;
 }
 
-async function runCoreTests({
-  socket,
-  key,
-  playerUuid,
-  playerName,
-  outDir,
-}) {
+async function runCoreTests({ socket, key, playerUuid, playerName, outDir }) {
   console.log("\n=== Running core events ===");
   const status = await emitWithAck(socket, "get_status", { key }, "get_status");
   await writeJson(outDir, "server_status.json", status);
@@ -381,12 +376,7 @@ async function runMtrLogTests({
   }
 }
 
-async function runMtrTests({
-  socket,
-  key,
-  outDir,
-  dimension,
-}) {
+async function runMtrTests({ socket, key, outDir, dimension }) {
   console.log("\n=== Running MTR events ===");
 
   const ping = await emitWithAck(
@@ -397,84 +387,29 @@ async function runMtrTests({
   );
   await writeJson(outDir, "mtr_beacon_ping.json", ping);
 
-  const dimensionContext = getDimensionContext(dimension);
-  const categoryFiles = [
-    { category: "depots", file: "mtr_depots.json" },
-    { category: "platforms", file: "mtr_platforms.json" },
-    { category: "rails", file: "mtr_rails.json" },
-    { category: "routes", file: "mtr_routes.json" },
-    { category: "signal-blocks", file: "mtr_signal_blocks.json" },
-    { category: "stations", file: "mtr_stations.json" },
-  ];
+  const railway = await emitWithAck(
+    socket,
+    "get_mtr_railway_snapshot",
+    dimension ? { key, dimension } : { key },
+    "get_mtr_railway_snapshot"
+  );
+  await writeJson(outDir, "mtr_railway_snapshot.json", railway);
 
-  const responses = {};
-  for (const { category, file } of categoryFiles) {
-    const payload = {
-      key,
-      category,
-      dimensionContext,
-      limit: 200,
-    };
-    const response = await emitWithAck(
-      socket,
-      "query_mtr_entities",
-      payload,
-      `query_mtr_entities(${category})`
+  const snapshots = Array.isArray(railway?.snapshots) ? railway.snapshots : [];
+  if (snapshots.length === 0) {
+    console.warn(
+      "Provider returned no snapshots for get_mtr_railway_snapshot."
     );
-    responses[category] = response;
-    await writeJson(outDir, file, response);
   }
-
-  const stationsData = responses.stations;
-  const firstStation = stationsData?.rows?.[0];
-  if (firstStation && firstStation.entity_id) {
-    const filtered = await emitWithAck(
-      socket,
-      "query_mtr_entities",
-      {
-        key,
-        category: "stations",
-        filters: {
-          entity_id: firstStation.entity_id,
-        },
-        includePayload: true,
-      },
-      "query_mtr_entities(station_filter)"
-    );
-    await writeJson(outDir, "mtr_stations_filtered.json", filtered);
-  }
-
-  const routesData = responses.routes;
-  const firstRoute = routesData?.rows?.[0];
-  if (firstRoute && firstRoute.entity_id) {
-    const sorted = await emitWithAck(
-      socket,
-      "query_mtr_entities",
-      {
-        key,
-        category: "routes",
-        limit: 50,
-        orderBy: "name",
-        orderDir: "ASC",
-        includePayload: false,
-      },
-      "query_mtr_entities(routes_sorted)"
-    );
-    await writeJson(outDir, "mtr_routes_sorted.json", sorted);
+  for (const snapshot of snapshots) {
+    const slug = dimensionToSlug(snapshot?.dimension || dimension || "unknown");
+    await writeJson(outDir, `mtr_railway_snapshot_${slug}.json`, {
+      dimension: snapshot?.dimension,
+      length: snapshot?.length,
+      payload: snapshot?.payload ?? null,
+    });
   }
 }
-
-function getDimensionContext(dimension) {
-  if (!dimension) {
-    return undefined;
-  }
-  const parts = dimension.split(':');
-  if (parts.length === 2) {
-    return `mtr/${parts[0]}/${parts[1]}`;
-  }
-  return `mtr/${dimension}`;
-}
-
 
 main().catch((err) => {
   console.error("Fatal error:", err);

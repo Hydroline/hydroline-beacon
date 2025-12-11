@@ -18,17 +18,17 @@ BEACON_PORT=48080 BEACON_KEY=... node test-socketio.js mtr         # 仅运行 M
 
 ## 环境变量
 
-| 变量名                   | 说明                                                    | 默认值/必填           |
-| ------------------------ | ------------------------------------------------------- | --------------------- |
-| `BEACON_HOST`            | Beacon 插件监听地址                                     | `127.0.0.1`           |
-| `BEACON_PORT`            | Beacon 端口                                             | **必填**              |
-| `BEACON_KEY`             | Socket.IO 请求密钥                                      | **必填**              |
-| `OUTPUT_DIR`             | 输出目录                                                | `tests/output`        |
-| `BEACON_PLAYER_UUID`     | 玩家 UUID，用于 player 相关事件                         | 可选                  |
-| `BEACON_PLAYER_NAME`     | 玩家名称（当 UUID 缺失时可用）                          | 可选                  |
-| `BEACON_MTR_DIMENSION`   | MTR 相关 action 用的维度，会转成 GraphQL 的 `dimensionContext`（例如 `minecraft:overworld` → `mtr/minecraft/overworld`） | `minecraft:overworld` |
+| 变量名                 | 说明                                                                                         | 默认值/必填           |
+| ---------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| `BEACON_HOST`          | Beacon 插件监听地址                                                                          | `127.0.0.1`           |
+| `BEACON_PORT`          | Beacon 端口                                                                                  | **必填**              |
+| `BEACON_KEY`           | Socket.IO 请求密钥                                                                           | **必填**              |
+| `OUTPUT_DIR`           | 输出目录                                                                                     | `tests/output`        |
+| `BEACON_PLAYER_UUID`   | 玩家 UUID，用于 player 相关事件                                                              | 可选                  |
+| `BEACON_PLAYER_NAME`   | 玩家名称（当 UUID 缺失时可用）                                                               | 可选                  |
+| `BEACON_MTR_DIMENSION` | MTR 相关 action 用的维度（例如 `minecraft:overworld`），用于 `get_mtr_railway_snapshot` 请求 | `minecraft:overworld` |
 
-> 提示：`BEACON_PLAYER_UUID/NAME` 未提供时，会跳过玩家专属事件但仍执行其他测试；MTR 维度用于 GraphQL 查询的 `dimensionContext`，只要 `world/mtr` 目录存在就可以正常回填数据。
+> 提示：`BEACON_PLAYER_UUID/NAME` 未提供时，会跳过玩家专属事件但仍执行其他测试；`BEACON_MTR_DIMENSION` 只决定 `get_mtr_railway_snapshot` 拉取哪一维度，只要 provider/Beakon 多侧处于运行即可取到快照。
 
 ## 事件分类
 
@@ -52,22 +52,14 @@ BEACON_PORT=48080 BEACON_KEY=... node test-socketio.js mtr         # 仅运行 M
 ### mtr 分类
 
 - `beacon_ping`
-- `query_mtr_entities`
+- `get_mtr_railway_snapshot`
 
-`query_mtr_entities` 会按 `depots/platforms/rails/routes/signal-blocks/stations` 六个 category 依次拉取数据，并将返回的 rows 写入 `output/mtr_<category>.json`。每个 payload 中都包含 `entity_id`/`transport_mode`/`name`/`payload` 等字段（payload 即 MessagePack 解析后的 JSON）；GraphQL 查询还会传入 `dimensionContext`（由 `BEACON_MTR_DIMENSION` 构建）以限定目标维度。
+`get_mtr_railway_snapshot` 会调用 Provider 通道返回 `stations`/`platforms`/`routes`/`depots` 四个结构，然后写出：
 
-为验证过滤、排序与 payload 可选项，脚本还会额外：
+- `output/mtr_railway_snapshot.json`（ACK 包含 `success`、`result`、`request_id`、`snapshots`）
+- `output/mtr_railway_snapshot_<dimension>.json`（每个快照只保留 `dimension`、`length`、`payload`，其中 `payload` 即 `stations`/`platforms`/`routes`/`depots`）
 
-- `output/mtr_stations_filtered.json`：基于第一条 station 的 `entity_id` 精确过滤一次 `stations` 分类。
-- `output/mtr_routes_sorted.json`：按 `orderBy=name`、`orderDir=ASC` 请求 `routes` 分类，同时将 `includePayload` 设为 `false` 以确保证书可以碾平结构。
-
-### 输出结构
-
-- `output/mtr_depots.json`、`output/mtr_platforms.json`、`output/mtr_rails.json`、`output/mtr_routes.json`、`output/mtr_signal_blocks.json`、`output/mtr_stations.json`：六个 category 的 GraphQL 响应，载有 `payload` 字段可直接用于多表查询。
-- `output/mtr_stations_filtered.json`：`entity_id` 过滤结果。
-- `output/mtr_routes_sorted.json`：按线路名称排序但省略 payload 的 routes 快速列表。
-
-> 注意：MTR 相关数据来自 Bukkit 插件周期扫描的 `world/mtr`，初次运行可能需要先执行 `force_update` 或等待扫描完成，否则 `query_mtr_entities` 可能返回空数组。
+> 注意：MTR 相关数据来自 Provider 提供的 `RailwayData`，需要 Provider 端与 Bukkit 通道都在线才能成功；`BEACON_MTR_DIMENSION` 决定拉取哪一个维度。
 
 ## 输出格式
 

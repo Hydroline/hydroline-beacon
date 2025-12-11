@@ -11,3 +11,5 @@
 - [x] 扩展 API 层（GraphQL + Socket.IO） —— 设计新的 `get_mtr_*` 事件/GraphQL schema：支持 Depot/Route/Station/Signal 等单表或多表 JOIN 查询，允许根据 `dimension_context`、`version`, `updated_since` 过滤；复用 `execute_sql` 安全层或新增 DAO，并确保响应分页/排序。
 
 - [x] 运行期配置与可观测性 —— 在 `plugin-config.json`/`PluginConfig` 引入开关（启用目录、扫描频率、最大并发、diff 保存期），添加日志/metrics（扫描耗时、文件/实体计数、错误统计），必要时提供 `socket event` 触发即时全量扫描以辅助运维。
+- [x] 接入 Provider `mtr:get_railway_snapshot` action —— 新增 `get_mtr_railway_snapshot` Socket.IO 事件，调用 Provider action、解 Base64 + MessagePack、仅返回 `stations/platforms/routes/depots` 四个数组，并把结果写入 docs/日志，方便 backend 直接消费。
+- [x] Socket.IO 服务器默认帧/内容长度较小，可能导致 `get_mtr_railway_snapshot` ACK payload 在传输中被截断，需要调高 `maxHttpContentLength`/`maxFramePayloadLength` 并验证输出。
