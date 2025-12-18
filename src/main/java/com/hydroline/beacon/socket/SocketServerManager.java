@@ -9,7 +9,6 @@ import com.corundumstudio.socketio.listener.ConnectListener;
 import com.corundumstudio.socketio.listener.DisconnectListener;
 import com.corundumstudio.socketio.listener.ExceptionListener;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hydroline.beacon.BeaconPlugin;
 import com.hydroline.beacon.config.PluginConfig;
@@ -54,7 +53,6 @@ import java.util.concurrent.TimeoutException;
 public class SocketServerManager {
 
     private final BeaconPlugin plugin;
-    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     private static final String[] RAILWAY_PAYLOAD_KEYS = new String[]{"stations", "platforms", "routes", "depots"};
     private SocketIOServer server;
     private final Map<UUID, Long> connectionOpenAt = new ConcurrentHashMap<>();
@@ -2062,16 +2060,7 @@ public class SocketServerManager {
                     row.put("last_updated", rs.getLong("last_updated"));
                     if (includePayload) {
                         String payload = rs.getString("payload");
-                        if (payload != null) {
-                            try {
-                                JsonNode node = JSON_MAPPER.readTree(payload);
-                                row.put("payload", node);
-                            } catch (IOException e) {
-                                row.put("payload", payload);
-                            }
-                        } else {
-                            row.put("payload", null);
-                        }
+                        row.put("payload", payload);
                     }
                     rows.add(row);
                 }
