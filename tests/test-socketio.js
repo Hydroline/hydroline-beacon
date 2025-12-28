@@ -334,6 +334,14 @@ async function runMtrLogTests({
   );
   await writeJson(outDir, `mtr_logs_${startDate}_to_${endDate}.json`, mtrLast7);
 
+  const mtrAll = await emitWithAck(
+    socket,
+    "get_player_mtr_logs",
+    { key, all: true },
+    "get_player_mtr_logs(all)"
+  );
+  await writeJson(outDir, "mtr_logs_all.json", mtrAll);
+
   const sessionsPage1 = await emitWithAck(
     socket,
     "get_player_sessions",

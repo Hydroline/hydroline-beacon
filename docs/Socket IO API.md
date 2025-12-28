@@ -177,7 +177,7 @@
 
 6. get_player_mtr_logs
 
-- 描述：查询 MTR 变更日志（表 `mtr_logs`），支持多条件过滤与分页。
+- 描述：查询 MTR 变更日志（表 `mtr_logs`），支持多条件过滤；**默认不分页**，仅当传入 `pageSize` 时启用分页。
 - 请求（字段均可选，除 `key`）：
 
 ```json
@@ -191,6 +191,7 @@
   "dimensionContext": "overworld|the_nether|the_end|...",
   "entryId": "<entry id>",
   "changeType": "ADD|REMOVE|UPDATE",
+  "all": true,
   "orderColumn": "timestamp|id",
   "order": "asc|desc",
   "page": 1,
@@ -200,7 +201,11 @@
 
 - 约束与说明：
   - `singleDate` 与 `startDate/endDate` 互斥；日期格式为 `YYYY-MM-DD`，服务器按本地时区做整日范围。
-  - 若请求页超出范围，会自动重置到第 1 页并返回有效数据。
+  - `all: true` 与 `singleDate`/`startDate`/`endDate` 互斥；`all: true` 表示无任何过滤返回全表。
+  - 传 `all: true` 时强制不分页（即使传了 `pageSize` 也忽略）。
+  - 不传 `pageSize` 时不分页；传 `pageSize` 后分页生效。
+  - 未分页时响应不包含 `page` / `page_size` 字段。
+  - 若启用分页且请求页超出范围，会自动重置到第 1 页并返回有效数据。
   - `orderColumn` 可选，允许字段：`timestamp`、`id`；默认 `timestamp`。
   - `order` 默认为 `desc`，与 `orderColumn` 组合后，默认表现为“最新时间戳在第一页”。如需正序请传 `order: "asc"`。
 - ACK 成功示例：

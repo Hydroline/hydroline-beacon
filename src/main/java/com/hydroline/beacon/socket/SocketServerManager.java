@@ -391,6 +391,7 @@ public class SocketServerManager {
                                 data.getDimensionContext(),
                                 data.getEntryId(),
                                 data.getChangeType(),
+                                data.getAll(),
                                 data.getPage(),
                                 data.getPageSize(),
                                 data.getOrder(),
@@ -1382,13 +1383,20 @@ public class SocketServerManager {
                                             String dimensionContext,
                                             String entryId,
                                             String changeType,
-                                            int page,
-                                            int pageSize,
+                                            Boolean all,
+                                            Integer page,
+                                            Integer pageSize,
                                             String order,
                                             String orderColumn) throws SQLException {
-        if (page <= 0) page = 1;
-        if (pageSize <= 0) pageSize = 50;
-        if (pageSize > 500) pageSize = 500; // hard cap
+        boolean paginated = pageSize != null;
+        if (Boolean.TRUE.equals(all)) {
+            paginated = false;
+        }
+        if (paginated) {
+            if (page == null || page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 50;
+            if (pageSize > 500) pageSize = 500; // hard cap
+        }
         // Mutually exclusive date parameters check
         if (singleDate != null && (startDate != null || endDate != null)) {
             throw new IllegalArgumentException("Provide either singleDate or startDate/endDate, not both");
@@ -1439,20 +1447,28 @@ public class SocketServerManager {
                 }
             }
             long total = (long) result.get("total");
-            int offset = (page - 1) * pageSize;
-            if (offset >= total) {
-                offset = 0; // reset if out of range to still return first page
-                page = 1;
+            int offset = 0;
+            if (paginated) {
+                offset = (page - 1) * pageSize;
+                if (offset >= total) {
+                    offset = 0; // reset if out of range to still return first page
+                    page = 1;
+                }
             }
-                String sql = "SELECT id, timestamp, player_name, player_uuid, class_name, entry_id, entry_name, position, change_type, old_data, new_data, source_file_path, source_line, dimension_context " +
-                    "FROM mtr_logs" + where + " ORDER BY " + orderByColumn + " " + orderClause + " LIMIT ? OFFSET ?";
+            String sql = "SELECT id, timestamp, player_name, player_uuid, class_name, entry_id, entry_name, position, change_type, old_data, new_data, source_file_path, source_line, dimension_context " +
+                "FROM mtr_logs" + where + " ORDER BY " + orderByColumn + " " + orderClause;
+            if (paginated) {
+                sql = sql + " LIMIT ? OFFSET ?";
+            }
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 int idx = 1;
                 for (Object p : params) {
                     ps.setObject(idx++, p);
                 }
-                ps.setInt(idx++, pageSize);
-                ps.setInt(idx, offset);
+                if (paginated) {
+                    ps.setInt(idx++, pageSize);
+                    ps.setInt(idx, offset);
+                }
                 List<Map<String, Object>> records = new ArrayList<>();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
@@ -1477,8 +1493,10 @@ public class SocketServerManager {
                 result.put("records", records);
             }
         }
-        result.put("page", page);
-        result.put("page_size", pageSize);
+        if (paginated) {
+            result.put("page", page);
+            result.put("page_size", pageSize);
+        }
         return result;
     }
 
@@ -2442,8 +2460,9 @@ public class SocketServerManager {
         private String dimensionContext; // optional
         private String entryId; // optional
         private String changeType; // optional
-        private int page = 1;
-        private int pageSize = 50;
+        private Boolean all; // optional
+        private Integer page;
+        private Integer pageSize;
         private String order = "desc";
         private String orderColumn; // optional: timestamp|id; default timestamp
 
@@ -2467,10 +2486,12 @@ public class SocketServerManager {
         public void setEntryId(String entryId) { this.entryId = entryId; }
         public String getChangeType() { return changeType; }
         public void setChangeType(String changeType) { this.changeType = changeType; }
-        public int getPage() { return page; }
-        public void setPage(int page) { this.page = page; }
-        public int getPageSize() { return pageSize; }
-        public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+        public Boolean getAll() { return all; }
+        public void setAll(Boolean all) { this.all = all; }
+        public Integer getPage() { return page; }
+        public void setPage(Integer page) { this.page = page; }
+        public Integer getPageSize() { return pageSize; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
         public String getOrder() { return order; }
         public void setOrder(String order) { this.order = order; }
         public String getOrderColumn() { return orderColumn; }

@@ -1,5 +1,5 @@
 name: Beacon
-version: 0.1.8
+version: 0.1.9
 main: com.hydroline.beacon.BeaconPlugin
 api-version: 1.16
 author: Hydroline
