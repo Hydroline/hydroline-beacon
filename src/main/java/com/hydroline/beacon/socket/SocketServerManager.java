@@ -94,17 +94,13 @@ public class SocketServerManager {
         }
         server = null;
 
-        Thread stopThread = new Thread(() -> {
-            disconnectClients(currentServer);
-            try {
-                currentServer.stop();
-                plugin.getLogger().info("Socket.IO server stopped.");
-            } catch (Exception e) {
-                plugin.getLogger().warning("Socket.IO server stop failed: " + e.getMessage());
-            }
-        }, "hydroline-beacon-socket-stop");
-        stopThread.setDaemon(true);
-        stopThread.start();
+        disconnectClients(currentServer);
+        try {
+            currentServer.stop();
+            plugin.getLogger().info("Socket.IO server stopped.");
+        } catch (Exception e) {
+            plugin.getLogger().warning("Socket.IO server stop failed: " + e.getMessage());
+        }
     }
 
     private void disconnectClients(SocketIOServer targetServer) {
