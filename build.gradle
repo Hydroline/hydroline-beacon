@@ -42,6 +42,10 @@ dependencies {
 shadowJar {
     archiveBaseName = 'hydroline-beacon'
     archiveClassifier = ''
+    // Relocate Netty so the shaded copy doesn't clash with the server's Netty version.
+    relocate('io.netty', 'com.hydroline.shadow.netty')
+    // Skip Java 21-specific multi-release classfiles that Shadow's ASM cannot parse.
+    exclude('META-INF/versions/21/**')
 }
 
 // Make build produce only the shaded jar
