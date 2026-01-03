@@ -81,4 +81,8 @@ public final class NettyGatewayConfig {
             return null;
         }
     }
+
+    public NettyGatewayConfig withListenPort(int listenPort) {
+        return new NettyGatewayConfig(this.listenAddress, listenPort, this.authToken, this.handshakeTimeoutSeconds, this.idleTimeoutSeconds);
+    }
 }

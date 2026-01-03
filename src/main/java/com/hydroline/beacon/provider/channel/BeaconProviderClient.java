@@ -90,6 +90,46 @@ public final class BeaconProviderClient {
         failAllPending(new IllegalStateException("Beacon Provider client stopped"));
     }
 
+    public synchronized String requestManualConnect(Integer portOverride) {
+        if (portOverride != null && portOverride <= 0) {
+            return "port must be a positive number";
+        }
+        if (stopRequested) {
+            stopRequested = false;
+        }
+        NettyGatewayConfig config = NettyGatewayConfig.load(GATEWAY_CONFIG_PATH, plugin.getLogger());
+        if (config == null) {
+            return "gateway config missing: " + GATEWAY_CONFIG_PATH;
+        }
+        if (!config.isEnabled()) {
+            return "gateway config is disabled or missing auth token";
+        }
+        if (portOverride != null) {
+            if (portOverride > 0 && portOverride <= 65535) {
+                config = config.withListenPort(portOverride);
+            } else {
+                return "port must be between 1 and 65535";
+            }
+        }
+        this.gatewayConfig = config;
+        if (!started) {
+            started = true;
+        }
+        submitConnect(0L);
+        return null;
+    }
+
+    public synchronized String requestManualDisconnect() {
+        if (!started) {
+            return "gateway client is not running";
+        }
+        stopRequested = true;
+        closeSocket();
+        failAllPending(new IOException("Manual disconnect requested"));
+        started = false;
+        return null;
+    }
+
     public boolean isStarted() {
         return started && session != null && socket != null;
     }

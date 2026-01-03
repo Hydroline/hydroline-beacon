@@ -120,10 +120,27 @@ public final class BeaconCommand implements CommandExecutor {
     }
 
     private void handleProvider(CommandSender sender, String locale, String[] args) {
-        if (args.length < 2 || !args[1].equalsIgnoreCase("status")) {
+        if (args.length < 2) {
             send(sender, locale, "commands.beacon.provider.invalid");
             return;
         }
+        String action = args[1].toLowerCase(Locale.ROOT);
+        switch (action) {
+            case "status":
+                handleProviderStatus(sender, locale);
+                break;
+            case "connect":
+                handleProviderConnect(sender, locale, args);
+                break;
+            case "disconnect":
+                handleProviderDisconnect(sender, locale);
+                break;
+            default:
+                send(sender, locale, "commands.beacon.provider.invalid");
+        }
+    }
+
+    private void handleProviderStatus(CommandSender sender, String locale) {
         BeaconProviderClient client = plugin.getBeaconProviderClient();
         if (client == null) {
             send(sender, locale, "commands.beacon.provider.status.unavailable");
@@ -153,6 +170,56 @@ public final class BeaconCommand implements CommandExecutor {
         send(sender, locale, "commands.beacon.provider.details.reconnect", snapshot.getReconnectDelayMillis());
         send(sender, locale, "commands.beacon.provider.details.version",
                 snapshot.getModVersion() != null ? snapshot.getModVersion() : "-");
+    }
+
+    private void handleProviderConnect(CommandSender sender, String locale, String[] args) {
+        BeaconProviderClient client = plugin.getBeaconProviderClient();
+        if (client == null) {
+            send(sender, locale, "commands.beacon.provider.status.unavailable");
+            return;
+        }
+        if (client.isStarted()) {
+            send(sender, locale, "commands.beacon.provider.connect.already");
+            return;
+        }
+        Integer port = null;
+        if (args.length >= 3) {
+            try {
+                port = Integer.parseInt(args[2]);
+                if (port <= 0) {
+                    throw new NumberFormatException();
+                }
+            } catch (NumberFormatException ex) {
+                send(sender, locale, "commands.beacon.provider.connect.invalid_port", args[2]);
+                return;
+            }
+        }
+        String error = client.requestManualConnect(port);
+        if (error != null) {
+            plugin.getLogger().warning("Manual Beacon Provider connect failed: " + error);
+            send(sender, locale, "commands.beacon.provider.connect.failed", error);
+            return;
+        }
+        String portHint = "";
+        if (port != null) {
+            portHint = translations.get(locale, "commands.beacon.provider.connect.port_hint", port);
+        }
+        send(sender, locale, "commands.beacon.provider.connect.started", portHint);
+    }
+
+    private void handleProviderDisconnect(CommandSender sender, String locale) {
+        BeaconProviderClient client = plugin.getBeaconProviderClient();
+        if (client == null) {
+            send(sender, locale, "commands.beacon.provider.status.unavailable");
+            return;
+        }
+        String error = client.requestManualDisconnect();
+        if (error != null) {
+            plugin.getLogger().warning("Manual Beacon Provider disconnect failed: " + error);
+            send(sender, locale, "commands.beacon.provider.disconnect.failed", error);
+            return;
+        }
+        send(sender, locale, "commands.beacon.provider.disconnect.success");
     }
 
     private void handleSync(CommandSender sender, String locale, String[] args) {
